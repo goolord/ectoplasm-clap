@@ -13,13 +13,14 @@ module Bindings = CmajorBindings
 let numNodes = 128
 let maxPickupDistance = 12.0 // nodes — matches the processor constant
 
-let width = 468
-let kymoHeight = 222
-let profileHeight = 92
-let historyRows = kymoHeight
+// ~7 s of history at 30 snapshots/s, whatever size the view is drawn at
+let historyRows = 210
 
 type t = {
   element: element,
+  width: int,
+  kymoHeight: int,
+  profileHeight: int,
   kymoCtx: ctx2d,
   profileCanvas: element,
   profileCtx: ctx2d,
@@ -43,8 +44,8 @@ let markDirty = view => {
   view.invalidate()
 }
 
-let nodeToX = (node: float) => node /. Int.toFloat(numNodes) *. Int.toFloat(width)
-let xToNode = (x: float) => x /. Int.toFloat(width) *. Int.toFloat(numNodes)
+let nodeToX = (view, node: float) => node /. Int.toFloat(numNodes) *. Int.toFloat(view.width)
+let xToNode = (view, x: float) => x /. Int.toFloat(view.width) *. Int.toFloat(numNodes)
 
 // Smallest colour span, so dither-level noise on a flat field isn't blown up.
 let minimumSpan = 0.03
@@ -83,7 +84,7 @@ let pushFrame = (view, frame: Bindings.latticeFrame) => {
   markDirty(view)
 }
 
-let drawMarkerLine = (ctx, x, colour, dashed) => {
+let drawMarkerLine = (ctx, x, height, colour, dashed) => {
   Ctx.save(ctx)
   Ctx.strokeStyle(ctx, colour)
   Ctx.lineWidth(ctx, 1.0)
@@ -92,15 +93,15 @@ let drawMarkerLine = (ctx, x, colour, dashed) => {
   }
   Ctx.beginPath(ctx)
   Ctx.moveTo(ctx, x, 0.0)
-  Ctx.lineTo(ctx, x, Int.toFloat(kymoHeight))
+  Ctx.lineTo(ctx, x, height)
   Ctx.stroke(ctx)
   Ctx.restore(ctx)
 }
 
 let renderKymograph = view => {
   let ctx = view.kymoCtx
-  let w = Int.toFloat(width)
-  let h = Int.toFloat(kymoHeight)
+  let w = Int.toFloat(view.width)
+  let h = Int.toFloat(view.kymoHeight)
   Ctx.fillStyle(ctx, Palette.well)
   Ctx.fillRect(ctx, 0.0, 0.0, w, h)
 
@@ -137,18 +138,18 @@ let renderKymograph = view => {
 
   switch view.latest {
   | Some(frame) =>
-    drawMarkerLine(ctx, nodeToX(frame.injectL), Palette.css(Palette.inkRgb, 0.4), true)
-    drawMarkerLine(ctx, nodeToX(frame.injectR), Palette.css(Palette.inkRgb, 0.4), true)
-    drawMarkerLine(ctx, nodeToX(frame.tapL), Palette.css(Palette.activeRgb, 0.75), false)
-    drawMarkerLine(ctx, nodeToX(frame.tapR), Palette.css(Palette.activeRgb, 0.75), false)
+    drawMarkerLine(ctx, nodeToX(view, frame.injectL), h, Palette.css(Palette.inkRgb, 0.4), true)
+    drawMarkerLine(ctx, nodeToX(view, frame.injectR), h, Palette.css(Palette.inkRgb, 0.4), true)
+    drawMarkerLine(ctx, nodeToX(view, frame.tapL), h, Palette.css(Palette.activeRgb, 0.75), false)
+    drawMarkerLine(ctx, nodeToX(view, frame.tapR), h, Palette.css(Palette.activeRgb, 0.75), false)
   | None => ()
   }
 }
 
 let renderProfile = view => {
   let ctx = view.profileCtx
-  let w = Int.toFloat(width)
-  let h = Int.toFloat(profileHeight)
+  let w = Int.toFloat(view.width)
+  let h = Int.toFloat(view.profileHeight)
   let top = 20.0
   let bottom = h -. 6.0
   Ctx.fillStyle(ctx, Palette.glass)
@@ -194,7 +195,7 @@ let renderProfile = view => {
       label,
       offset,
     )) => {
-      let x = nodeToX(node)
+      let x = nodeToX(view, node)
       Ctx.beginPath(ctx)
       Ctx.moveTo(ctx, x -. 4.0, 2.0)
       Ctx.lineTo(ctx, x +. 4.0, 2.0)
@@ -218,7 +219,7 @@ let renderProfile = view => {
       label,
       side,
     )) => {
-      let x = nodeToX(node)
+      let x = nodeToX(view, node)
       let y = yOf(sample(node))
       let active = view.dragging == Some(side)
       Ctx.beginPath(ctx)
@@ -242,6 +243,9 @@ let render = view =>
   }
 
 let make = (
+  ~width: int,
+  ~kymoHeight: int,
+  ~profileHeight: int,
   ~onPickupDistance: float => unit,
   ~onGestureStart: unit => unit,
   ~onGestureEnd: unit => unit,
@@ -284,6 +288,9 @@ let make = (
 
   let view = {
     element,
+    width,
+    kymoHeight,
+    profileHeight,
     kymoCtx,
     profileCanvas,
     profileCtx,
@@ -305,7 +312,7 @@ let make = (
     switch view.latest {
     | None => None
     | Some(frame) =>
-      let node = xToNode(x)
+      let node = xToNode(view, x)
       let nodes = switch side {
       | #left => node -. frame.injectL
       | #right => frame.injectR -. node
@@ -318,8 +325,8 @@ let make = (
     | None => ()
     | Some(frame) =>
       let (x, _) = localPoint(profileCanvas, ev, ~width=Int.toFloat(width), ~height=Int.toFloat(profileHeight))
-      let dl = Math.abs(x -. nodeToX(frame.tapL))
-      let dr = Math.abs(x -. nodeToX(frame.tapR))
+      let dl = Math.abs(x -. nodeToX(view, frame.tapL))
+      let dr = Math.abs(x -. nodeToX(view, frame.tapR))
       let side = dl <= dr ? #left : #right
       if Math.min(dl, dr) < 24.0 {
         preventDefault(ev)

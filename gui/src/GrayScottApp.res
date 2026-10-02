@@ -1,5 +1,13 @@
-// Top-level view: the stage the phase plane, lattice view and sliders live on, wired to the
-// patch through the typed Bridge.
+// Top-level view: two pages on one stage, wired to the patch through the typed Bridge.
+//
+//  * Play (the default): what you see is what you hear. The ring itself, live; the resonance it
+//    will put on a sound, as a frequency response; and six knobs that say what they do in the
+//    units you hear — Pitch in Hz and notes, Ring as a decay time, Color as the regime (see
+//    Macro.res for how the macros map onto the parameters).
+//  * Lab: the F×K phase plane and every parameter on a slider.
+//
+// Every parameter lives in one mirror (values). Whatever moves it — a knob, a slider, the phase
+// plane, a preset, host automation — goes through applyValue, so every view agrees.
 //
 // What the plugin's web view needs smoothing over comes from nano-clap's Shell.res:
 //
@@ -10,15 +18,16 @@
 //    lays the page out again at the scale, so text and lines land on whole device pixels at any
 //    size; a transform only where zoom isn't supported.
 //  - The browser's context menu, shortcuts and page zoom are off (BrowserChrome), and the host's
-//    parameter menu opens on a double right-click on a slider (HostMenu).
-//  - In the CLAP plugin the interface size is a user setting (Settings): the Size control asks
-//    the host to resize the window and opens new windows at that size.
+//    parameter menu opens on a double right-click on a slider or knob (HostMenu).
+//  - In the CLAP plugin the interface size and the page you were on are user settings
+//    (Settings): the Size control asks the host to resize the window.
 //  - Nothing repaints on a timer: a change (a lattice snapshot, a moved parameter) schedules one
-//    animation frame.
+//    animation frame, and only the page on show is drawn.
 
 open Web
 module Param = CmajorBindings.Param
 module Bridge = CmajorBindings.Bridge
+module T = GrayScottTheory
 
 let designWidth = 880.
 let designHeight = 560.
@@ -59,48 +68,72 @@ let stylesheet = `
   font-family: Bahnschrift, "DIN Alternate", "DIN 2014", "Roboto Condensed", "Arial Narrow", sans-serif;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
-  user-select: none;
   overflow: hidden;
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto 1fr;
   row-gap: 10px;
 }
 .gsr *, .gsr *::before, .gsr *::after { box-sizing: inherit; }
 
-.gsr header { display: flex; align-items: baseline; gap: 14px; }
-.gsr h1 {
-  margin: 0;
-  font-size: 22px;
-  font-weight: 300;
-  font-stretch: condensed;
-  letter-spacing: 0.01em;
+.gsr button {
+  font: inherit;
+  color: var(--ink);
+  background: var(--glass);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 3px 12px;
+  cursor: pointer;
 }
-.gsr h1 b { font-weight: 700; color: var(--accent); }
-.gsr .subtitle { color: var(--ink-muted); font-size: 12px; }
-.gsr .meter { margin-left: auto; display: flex; align-items: center; gap: 8px; color: var(--ink-muted); }
-.gsr .size { position: relative; align-self: center; }
-.gsr .size > button { margin: 0; padding: 2px 10px; }
-.gsr .size-menu {
-  position: absolute; right: 0; top: calc(100% + 4px); z-index: 2; display: none;
+.gsr button:hover { border-color: var(--accent); }
+.gsr :focus-visible { outline: 2px solid var(--active); outline-offset: 2px; }
+
+/* header */
+.gsr header { display: flex; align-items: center; gap: 12px; height: 30px; }
+.gsr h1 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: 0.02em; color: var(--accent); }
+.gsr .presets { position: relative; display: flex; align-items: center; gap: 2px; margin-left: 6px; }
+.gsr .presets > button { padding: 2px 8px; }
+.gsr .preset-name { min-width: 168px; text-align: left; display: flex; align-items: baseline; gap: 8px; }
+.gsr .preset-name .edited { color: var(--ink-muted); font-size: 11px; }
+.gsr .preset-menu {
+  position: absolute; left: 0; top: calc(100% + 4px); z-index: 3; display: none; width: 360px;
   padding: 4px; background: var(--glass); border: 1px solid var(--rule); border-radius: 6px;
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+}
+.gsr .preset-menu.on { display: grid; gap: 1px; }
+.gsr .preset-menu button {
+  display: grid; gap: 1px; text-align: left; border-color: transparent; background: transparent; padding: 5px 8px;
+}
+.gsr .preset-menu button:hover, .gsr .preset-menu button.on { background: var(--slide); border-color: var(--rule); }
+.gsr .preset-menu .name { font-weight: 600; }
+.gsr .preset-menu button.on .name { color: var(--accent); }
+.gsr .preset-menu .desc { color: var(--ink-muted); font-size: 11px; }
+.gsr .spacer { flex: 1; }
+.gsr .pages { display: flex; }
+.gsr .pages button { padding: 2px 14px; border-radius: 0; }
+.gsr .pages button:first-child { border-radius: 4px 0 0 4px; }
+.gsr .pages button:last-child { border-radius: 0 4px 4px 0; border-left: none; }
+.gsr .pages button.on { background: var(--accent); color: var(--slide); border-color: var(--accent); font-weight: 600; }
+.gsr .meter { display: flex; align-items: center; gap: 6px; color: var(--ink-muted); }
+.gsr .meter-track { width: 72px; height: 6px; background: var(--glass); border-radius: 3px; overflow: hidden; }
+.gsr .meter-fill { height: 100%; width: 0%; background: linear-gradient(90deg, var(--fill), var(--accent)); }
+.gsr .size { position: relative; }
+.gsr .size > button { padding: 2px 10px; }
+.gsr .size-menu {
+  position: absolute; right: 0; top: calc(100% + 4px); z-index: 3; display: none;
+  padding: 4px; background: var(--glass); border: 1px solid var(--rule); border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
 }
 .gsr .size-menu.on { display: grid; gap: 2px; }
-.gsr .size-menu button { margin: 0; width: 72px; text-align: right; border-color: transparent; background: transparent; }
+.gsr .size-menu button { width: 72px; text-align: right; border-color: transparent; background: transparent; }
 .gsr .size-menu button.on { color: var(--active); border-color: var(--rule); }
-.gsr .meter-track { width: 120px; height: 6px; background: var(--glass); border-radius: 3px; overflow: hidden; }
-.gsr .meter-fill { height: 100%; width: 0%; background: linear-gradient(90deg, var(--fill), var(--active)); }
 
-.gsr main { display: grid; grid-template-columns: 372px 1fr; column-gap: 16px; min-height: 0; }
-.gsr .phase { display: flex; flex-direction: column; gap: 6px; }
-.gsr .phase-canvas { display: block; border-radius: 6px; cursor: crosshair; touch-action: none; }
-.gsr .phase-readout { padding: 0 2px; display: grid; gap: 2px; }
-.gsr .phase-region-line { display: flex; align-items: baseline; gap: 10px; }
-.gsr .phase-region { font-size: 16px; font-weight: 700; }
-.gsr .phase-values { color: var(--ink-muted); white-space: pre; }
-.gsr .phase-hint { color: var(--ink); }
-.gsr .phase-resonance { color: var(--active); }
+/* pages */
+.gsr .page { display: none; min-height: 0; }
+.gsr .page.on { display: grid; }
+.gsr .play { grid-template-rows: auto auto 1fr; row-gap: 10px; }
+.gsr .lab { grid-template-rows: 1fr auto; row-gap: 10px; }
 
+/* the lattice view (both pages) */
 .gsr .lattice { display: flex; flex-direction: column; gap: 6px; }
 .gsr .kymograph-wrap { position: relative; }
 .gsr .kymograph { display: block; border-radius: 6px 6px 2px 2px; }
@@ -112,6 +145,33 @@ let stylesheet = `
 .gsr .time-label { position: absolute; right: 6px; font-size: 10px; color: var(--ink-muted); opacity: 0.8; }
 .gsr .time-now { top: 4px; }
 .gsr .time-ago { bottom: 4px; }
+
+/* play page */
+.gsr .response { display: block; border-radius: 6px; }
+.gsr .knobs { display: grid; grid-template-columns: repeat(6, 1fr); align-items: start; }
+.gsr .knob { display: grid; justify-items: center; gap: 2px; padding: 4px 0; border-radius: 8px; outline-offset: -2px; }
+.gsr .knob svg { display: block; cursor: ns-resize; touch-action: none; }
+.gsr .knob-label { font-size: 13px; font-weight: 600; color: var(--ink); }
+.gsr .knob-text { font-size: 14px; color: var(--accent); min-height: 17px; }
+.gsr .knob-detail { font-size: 11px; color: var(--ink-muted); min-height: 14px; }
+.gsr .knob-track { fill: none; stroke: var(--rule); stroke-width: 5; stroke-linecap: round; }
+.gsr .knob-value { fill: none; stroke: var(--accent); stroke-width: 5; stroke-linecap: round; }
+.gsr .knob-cap { fill: var(--glass); stroke: var(--rule); stroke-width: 1; }
+.gsr .knob-pointer { stroke: var(--active); stroke-width: 2.5; stroke-linecap: round; }
+.gsr .knob:hover .knob-cap, .gsr .knob.active .knob-cap { stroke: var(--accent); }
+.gsr .knob.muted .knob-value { stroke: var(--ink-muted); }
+.gsr .knob.muted .knob-text { color: var(--ink-muted); }
+
+/* lab page */
+.gsr main { display: grid; grid-template-columns: 372px 1fr; column-gap: 16px; min-height: 0; }
+.gsr .phase { display: flex; flex-direction: column; gap: 6px; }
+.gsr .phase-canvas { display: block; border-radius: 6px; cursor: crosshair; touch-action: none; }
+.gsr .phase-readout { padding: 0 2px; display: grid; gap: 2px; }
+.gsr .phase-region-line { display: flex; align-items: baseline; gap: 10px; }
+.gsr .phase-region { font-size: 16px; font-weight: 700; }
+.gsr .phase-values { color: var(--ink-muted); white-space: pre; }
+.gsr .phase-hint { color: var(--ink); }
+.gsr .phase-resonance { color: var(--active); }
 
 .gsr .controls { display: grid; grid-template-columns: repeat(3, 1fr); column-gap: 16px; }
 .gsr .control-group { display: grid; gap: 4px; align-content: start; }
@@ -126,6 +186,7 @@ let stylesheet = `
 .gsr .slider { display: grid; grid-template-columns: 96px 1fr 58px; align-items: center; column-gap: 8px; height: 22px; }
 .gsr .slider-label { color: var(--ink); }
 .gsr .slider-value { text-align: right; color: var(--ink-muted); }
+.gsr .control-group > button { justify-self: start; margin-top: 4px; }
 
 .gsr input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 18px; background: transparent; margin: 0; }
 .gsr input[type=range]::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: var(--rule); }
@@ -136,40 +197,44 @@ let stylesheet = `
 .gsr input[type=range]::-moz-range-track { height: 4px; border-radius: 2px; background: var(--rule); }
 .gsr input[type=range]::-moz-range-thumb { width: 10px; height: 10px; border-radius: 50%; background: var(--slide); border: 2px solid var(--accent); }
 .gsr input[type=range]:hover::-webkit-slider-thumb { border-color: var(--active); }
-
-.gsr button {
-  justify-self: start;
-  margin-top: 4px;
-  font: inherit;
-  color: var(--ink);
-  background: var(--glass);
-  border: 1px solid var(--rule);
-  border-radius: 4px;
-  padding: 3px 12px;
-  cursor: pointer;
-}
-.gsr button:hover { border-color: var(--accent); }
-.gsr :focus-visible { outline: 2px solid var(--active); outline-offset: 2px; }
 `
 
+type page = Play | Lab
+
+type knobs = {
+  pitch: Knob.t,
+  ring: Knob.t,
+  color: Knob.t,
+  drive: Knob.t,
+  mix: Knob.t,
+  output: Knob.t,
+}
+
 type t = {
-  root: element,
   bridge: Bridge.t,
   phase: PhasePlot.t,
-  lattice: LatticeView.t,
-  sliders: array<Controls.slider>,
+  labLattice: LatticeView.t,
+  playLattice: LatticeView.t,
+  response: ResponsePlot.t,
   meterFill: element,
+  mutable page: page,
   mutable level: float,
   mutable shownLevel: float,
   mutable frameHandle: option<int>,
   mutable cleanups: array<unit => unit>,
 }
 
-// One animation frame per change, never a free-running loop.
+// One animation frame per change, never a free-running loop; only the page on show is drawn.
 let render = app => {
   app.frameHandle = None
-  PhasePlot.render(app.phase)
-  LatticeView.render(app.lattice)
+  switch app.page {
+  | Play =>
+    LatticeView.render(app.playLattice)
+    ResponsePlot.render(app.response)
+  | Lab =>
+    PhasePlot.render(app.phase)
+    LatticeView.render(app.labLattice)
+  }
   // the meter moves in 1 % steps, so a steady level writes no styles
   let level = Math.round(Math.min(1.0, app.level *. 2.0) *. 100.0)
   if level != app.shownLevel {
@@ -183,19 +248,35 @@ let invalidate = app =>
     app.frameHandle = Some(requestAnimationFrame(_ => render(app)))
   }
 
+// Closes a popup menu on a press anywhere outside its box. Returns the function that stops it.
+let closeOnOutsidePress = (box, menu) =>
+  listenDocument(
+    "pointerdown",
+    ev =>
+      if !(box->contains(ev->originalTarget)) {
+        menu->toggleClass("on", false)
+      },
+    ~capture=true,
+    ~passive=true,
+  )
+
+let button = (~text, ~title=?) => {
+  let b = createElement("button")
+  setAttribute(b, "type", "button")
+  setTextContent(b, text)
+  title->Option.forEach(t => setAttribute(b, "title", t))
+  b
+}
+
 // The interface size control: only shown where the plugin keeps the setting and sizes the
 // window (the CLAP plugin), as nano-clap's settings dialog does.
 let makeSizeControl = (settings: Settings.t) => {
   let box = div(~className="size")
-  let toggle = createElement("button")
-  setAttribute(toggle, "type", "button")
-  setAttribute(toggle, "title", "Size of the interface")
+  let toggle = button(~text="", ~title="Size of the interface")
   let menu = div(~className="size-menu")
   let percent = zoom => Float.toString(Math.round(zoom *. 100.)) ++ "%"
   let steps = Settings.zoomSteps->Array.map(zoom => {
-    let b = createElement("button")
-    setAttribute(b, "type", "button")
-    setTextContent(b, percent(zoom))
+    let b = button(~text=percent(zoom))
     b->addEventListener("click", _ => {
       settings->Settings.setZoom(zoom)
       menu->toggleClass("on", false)
@@ -214,16 +295,7 @@ let makeSizeControl = (settings: Settings.t) => {
   }
   update()
   let stopListening = settings->Settings.listen(update)
-  // a press anywhere else closes the menu
-  let stopOutside = listenDocument(
-    "pointerdown",
-    ev =>
-      if !(box->contains(ev->originalTarget)) {
-        menu->toggleClass("on", false)
-      },
-    ~capture=true,
-    ~passive=true,
-  )
+  let stopOutside = closeOnOutsidePress(box, menu)
   (
     box,
     () => {
@@ -249,33 +321,26 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
   let root = div(~className="gsr")
   shadow->appendChild(root)
 
-  // Header
-  let header = createElement("header")
-  let title = createElement("h1")
-  setInnerHTML(title, "Gray-Scott <b>Resonator</b>")
-  let subtitle = createElement("span")
-  setClassName(subtitle, "subtitle")
-  setTextContent(subtitle, "Reaction-diffusion on a 128-node ring")
-  let meter = div(~className="meter")
-  let meterLabel = createElement("span")
-  setTextContent(meterLabel, "Lattice level")
-  let meterTrack = div(~className="meter-track")
-  let meterFill = div(~className="meter-fill")
-  meterTrack->appendChild(meterFill)
-  meter->appendChild(meterLabel)
-  meter->appendChild(meterTrack)
-  let (sizeControl, stopSizeControl) = makeSizeControl(settings)
-  header->appendChild(title)
-  header->appendChild(subtitle)
-  header->appendChild(meter)
-  header->appendChild(sizeControl)
+  //==============================================================================
+  // The parameter mirror, and the one place a value changes
 
-  // Phase plane (F, K move together under one gesture)
+  let values = Dict.make()
+  Param.all->Array.forEach(p => values->Dict.set(Param.id(p), Param.spec(p).init))
+  let valueOf = p => values->Dict.get(Param.id(p))->Option.getOr(Param.spec(p).init)
+  let currentF = () => valueOf(Feed)
+  let currentK = () => valueOf(Kill)
+  let currentSpeed = () => valueOf(Speed)
+  let currentResonance = () => valueOf(Feedback)
+
+  // Views built below call back into send and refreshDerived, which need those views.
+  let onPhaseMove: ref<(float, float) => unit> = ref((_, _) => ())
+  let onPickupMove: ref<float => unit> = ref(_ => ())
+
+  //==============================================================================
+  // Views
+
   let phase = PhasePlot.make(
-    ~onChange=(~f, ~k) => {
-      Bridge.set(bridge, Feed, f)
-      Bridge.set(bridge, Kill, k)
-    },
+    ~onChange=(~f, ~k) => onPhaseMove.contents(f, k),
     ~onGestureStart=() => {
       Bridge.beginGesture(bridge, Feed)
       Bridge.beginGesture(bridge, Kill)
@@ -285,58 +350,413 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
       Bridge.endGesture(bridge, Kill)
     },
   )
+  let lattice = (~width, ~kymoHeight, ~profileHeight) =>
+    LatticeView.make(
+      ~width,
+      ~kymoHeight,
+      ~profileHeight,
+      ~onPickupDistance=d => onPickupMove.contents(d),
+      ~onGestureStart=() => Bridge.beginGesture(bridge, TapDistance),
+      ~onGestureEnd=() => Bridge.endGesture(bridge, TapDistance),
+    )
+  let labLattice = lattice(~width=468, ~kymoHeight=222, ~profileHeight=92)
+  let playLattice = lattice(~width=848, ~kymoHeight=196, ~profileHeight=56)
+  let response = ResponsePlot.make(~width=848, ~height=92)
 
-  // Controls (built before the lattice view so pickup drags can update the slider)
-  let reseed = createElement("button")
-  setAttribute(reseed, "type", "button")
-  setTextContent(reseed, "Reseed lattice")
-  reseed->addEventListener("click", _ => Bridge.reseed(bridge))
+  //==============================================================================
+  // Header
 
-  let (controls, sliders) = Controls.make(
-    bridge,
-    ~hostMenu,
-    ~onLocalChange=(param, value) =>
-      switch param {
-      | Speed => PhasePlot.setSpeed(phase, value)
-      | _ => ()
-      },
-    ~extra=reseed,
-  )
-  let sliderFor = param => sliders->Array.find(s => s.param == param)
+  let header = createElement("header")
+  let title = createElement("h1")
+  setTextContent(title, "Ectoplasm")
+  setAttribute(title, "title", "A Gray-Scott reaction-diffusion resonator")
 
-  let lattice = LatticeView.make(
-    ~onPickupDistance=d => {
-      Bridge.set(bridge, TapDistance, d)
-      sliderFor(TapDistance)->Option.forEach(s => Controls.show(s, d))
-    },
-    ~onGestureStart=() => Bridge.beginGesture(bridge, TapDistance),
-    ~onGestureEnd=() => Bridge.endGesture(bridge, TapDistance),
-  )
+  let presetBox = div(~className="presets")
+  let previous = button(~text="‹", ~title="Previous preset")
+  let presetName = button(~text="")
+  setClassName(presetName, "preset-name")
+  let presetLabel = createElement("span")
+  let editedLabel = createElement("span")
+  setClassName(editedLabel, "edited")
+  presetName->appendChild(presetLabel)
+  presetName->appendChild(editedLabel)
+  let next = button(~text="›", ~title="Next preset")
+  let presetMenu = div(~className="preset-menu")
+  presetBox->appendChild(previous)
+  presetBox->appendChild(presetName)
+  presetBox->appendChild(next)
+  presetBox->appendChild(presetMenu)
 
-  let main = createElement("main")
-  main->appendChild(phase.element)
-  main->appendChild(lattice.element)
+  let pages = div(~className="pages")
+  let playButton = button(~text="Play", ~title="Macro knobs and the sound you'll hear")
+  let labButton = button(~text="Lab", ~title="The F×K phase plane and every parameter")
+  pages->appendChild(playButton)
+  pages->appendChild(labButton)
 
-  root->appendChild(header)
-  root->appendChild(main)
-  root->appendChild(controls)
+  let meter = div(~className="meter")
+  let meterLabel = createElement("span")
+  setTextContent(meterLabel, "Level")
+  let meterTrack = div(~className="meter-track")
+  let meterFill = div(~className="meter-fill")
+  meterTrack->appendChild(meterFill)
+  meter->appendChild(meterLabel)
+  meter->appendChild(meterTrack)
+  let (sizeControl, stopSizeControl) = makeSizeControl(settings)
+
+  header->appendChild(title)
+  header->appendChild(presetBox)
+  header->appendChild(div(~className="spacer"))
+  header->appendChild(pages)
+  header->appendChild(meter)
+  header->appendChild(sizeControl)
 
   let app = {
-    root,
     bridge,
     phase,
-    lattice,
-    sliders,
+    labLattice,
+    playLattice,
+    response,
     meterFill,
+    page: Play,
     level: 0.0,
     shownLevel: -1.0,
     frameHandle: None,
     cleanups: [],
   }
   phase.invalidate = () => invalidate(app)
-  lattice.invalidate = () => invalidate(app)
+  labLattice.invalidate = () => invalidate(app)
+  playLattice.invalidate = () => invalidate(app)
+  response.invalidate = () => invalidate(app)
 
+  let sliders: ref<array<Controls.slider>> = ref([])
+  let knobsRef: ref<option<knobs>> = ref(None)
+  let lastPreset: ref<option<Presets.preset>> = ref(None)
+
+  let refreshPresetLabel = () => {
+    let matching = Presets.all->Array.find(p => Presets.matches(p, valueOf))
+    switch (matching, lastPreset.contents) {
+    | (Some(p), _) =>
+      setTextContent(presetLabel, p.name)
+      setTextContent(editedLabel, "")
+      presetName->setAttribute("title", p.description)
+    | (None, Some(p)) =>
+      setTextContent(presetLabel, p.name)
+      setTextContent(editedLabel, "edited")
+      presetName->setAttribute("title", p.description ++ " (edited)")
+    | (None, None) =>
+      setTextContent(presetLabel, "Custom")
+      setTextContent(editedLabel, "")
+      presetName->setAttribute("title", "Pick a preset")
+    }
+  }
+
+  // What the knobs, the response plot and the preset name show follows from all the values.
+  let refreshDerived = () => {
+    let f = currentF()
+    let k = currentK()
+    let speed = currentSpeed()
+    let resonance = currentResonance()
+    ResponsePlot.set(response, ~f, ~k, ~speed, ~resonance)
+    PhasePlot.setResonance(phase, resonance)
+    knobsRef.contents->Option.forEach(knobs => {
+      let focus = Macro.focus(~f, ~k, ~speed, ~resonance)
+      let approximate = Macro.pitchIsApproximate(~ratio=valueOf(DiffusionRatio), ~drive=valueOf(Drive))
+      switch focus {
+      | Some({hz}) =>
+        knobs.pitch->Knob.set(
+          Macro.hzToNorm(hz),
+          ~text=(approximate ? "≈ " : "") ++ Macro.formatHz(hz),
+          ~detail=Macro.noteName(hz) ++ (approximate ? ", roughly" : ""),
+        )
+      | None =>
+        knobs.pitch->Knob.set(
+          Param.toNormalised(Speed, speed),
+          ~text="Speed " ++ Float.toFixed(speed, ~digits=2) ++ "×",
+          ~detail="no pitch here",
+          ~muted=true,
+        )
+      }
+      let ring = Macro.resonanceToRing(resonance)
+      switch focus {
+      | Some({ringSeconds: Some(seconds)}) =>
+        knobs.ring->Knob.set(ring, ~text=Macro.formatSeconds(seconds), ~detail="to fade 60 dB")
+      | Some({ringSeconds: None}) => knobs.ring->Knob.set(ring, ~text="Sustains", ~detail="self-oscillates")
+      | None => knobs.ring->Knob.set(ring, ~text="No focus", ~detail="turn Color", ~muted=true)
+      }
+      let (color, onBand) = Macro.colorOf(~f, ~k)
+      let region = T.regionName(T.classify(~f, ~k))
+      knobs.color->Knob.set(
+        color,
+        ~text=region,
+        ~detail=onBand ? "K " ++ Float.toFixed(k, ~digits=4) : "Lab setting, turn to retune",
+        ~muted=!onBand,
+      )
+      let show = (knob, p) =>
+        knob->Knob.set(Param.toNormalised(p, valueOf(p)), ~text=Param.spec(p).format(valueOf(p)), ~detail="")
+      show(knobs.drive, Drive)
+      show(knobs.mix, Mix)
+      show(knobs.output, OutputGain)
+    })
+    refreshPresetLabel()
+  }
+
+  // A value has changed, from anywhere: mirror it and show it in the views that show it directly.
+  let applyValue = (param: Param.t, value) => {
+    let value = Param.clamp(param, value)
+    values->Dict.set(Param.id(param), value)
+    switch param {
+    | Feed | Kill => PhasePlot.setFK(phase, ~f=currentF(), ~k=currentK())
+    | Speed => PhasePlot.setSpeed(phase, value)
+    | _ => ()
+    }
+    sliders.contents
+    ->Array.find(s => s.param == param)
+    ->Option.forEach(s =>
+      if s.value != value {
+        Controls.show(s, value)
+      }
+    )
+  }
+
+  // ...and when it came from this view, send it on.
+  let send = (param, value) => {
+    applyValue(param, value)
+    Bridge.set(bridge, param, valueOf(param))
+  }
+
+  onPhaseMove :=
+    (f, k) => {
+      send(Feed, f)
+      send(Kill, k)
+      refreshDerived()
+    }
+  onPickupMove :=
+    d => {
+      send(TapDistance, d)
+      refreshDerived()
+    }
+
+  //==============================================================================
+  // Presets
+
+  let selectPreset = (preset: Presets.preset) => {
+    lastPreset := Some(preset)
+    preset.values->Array.forEach(((p, v)) => {
+      Bridge.beginGesture(bridge, p)
+      send(p, v)
+      Bridge.endGesture(bridge, p)
+    })
+    // start the ring from rest on the new chemistry
+    Bridge.reseed(bridge)
+    refreshDerived()
+  }
+
+  let step = delta => {
+    let count = Array.length(Presets.all)
+    let index = switch lastPreset.contents {
+    | Some(p) => Presets.all->Array.findIndex(q => q.name == p.name)
+    | None => -1
+    }
+    Presets.all[mod(index + delta + count, count)]->Option.forEach(selectPreset)
+  }
+  previous->addEventListener("click", _ => step(-1))
+  next->addEventListener("click", _ => step(1))
+
+  let menuButtons = Presets.all->Array.map(preset => {
+    let b = button(~text="")
+    let name = createElement("span")
+    setClassName(name, "name")
+    setTextContent(name, preset.name)
+    let desc = createElement("span")
+    setClassName(desc, "desc")
+    setTextContent(desc, preset.description)
+    b->appendChild(name)
+    b->appendChild(desc)
+    b->addEventListener("click", _ => {
+      selectPreset(preset)
+      presetMenu->toggleClass("on", false)
+    })
+    presetMenu->appendChild(b)
+    (preset, b)
+  })
+  presetName->addEventListener("click", _ => {
+    menuButtons->Array.forEach(((p, b)) => b->toggleClass("on", Presets.matches(p, valueOf)))
+    presetMenu->toggleClass("on", true)
+  })
+  let stopPresetMenu = closeOnOutsidePress(presetBox, presetMenu)
+
+  //==============================================================================
+  // Play page
+
+  // Pitch is a target the macros hold while the others move: each change re-solves Speed for
+  // the note on show.
+  let heldPitch = () =>
+    Macro.pitch(~f=currentF(), ~k=currentK(), ~speed=currentSpeed(), ~resonance=currentResonance())
+    ->Option.getOr(220.0)
+  let retune = (~f, ~k, ~hz, ~resonance) => {
+    send(Feedback, resonance)
+    send(Speed, Macro.speedFor(~hz, ~f, ~k, ~resonance))
+    refreshDerived()
+  }
+  let gestures = (params: array<Param.t>) => (
+    () => params->Array.forEach(p => Bridge.beginGesture(bridge, p)),
+    () => params->Array.forEach(p => Bridge.endGesture(bridge, p)),
+  )
+  let (colorStart, colorEnd) = gestures([Feed, Kill, Speed, Feedback])
+  let (tuningStart, tuningEnd) = gestures([Speed, Feedback])
+
+  let moveOnBand = color => {
+    let hz = heldPitch()
+    let (f, k) = Macro.toFK(color)
+    send(Feed, f)
+    send(Kill, k)
+    retune(~f, ~k, ~hz, ~resonance=currentResonance())
+  }
+
+  let paramKnob = (param: Param.t, ~label, ~title) =>
+    Knob.make(
+      ~label,
+      ~title,
+      ~defaultValue=Param.toNormalised(param, Param.spec(param).init),
+      ~onChange=n => {
+        send(param, Param.fromNormalised(param, n))
+        refreshDerived()
+      },
+      ~onGestureStart=() => Bridge.beginGesture(bridge, param),
+      ~onGestureEnd=() => Bridge.endGesture(bridge, param),
+    )
+  let init = p => Param.spec(p).init
+  let (initColor, _) = Macro.colorOf(~f=init(Feed), ~k=init(Kill))
+  let knobs = {
+    pitch: Knob.make(
+      ~label="Pitch",
+      ~title="The note the lattice rings at. Color and Ring keep it where you put it.",
+      ~defaultValue=Macro.hzToNorm(
+        Macro.pitch(
+          ~f=init(Feed),
+          ~k=init(Kill),
+          ~speed=init(Speed),
+          ~resonance=init(Feedback),
+        )->Option.getOr(345.0),
+      ),
+      ~onChange=n => {
+        let (f, k) = (currentF(), currentK())
+        switch Macro.focus(~f, ~k, ~speed=currentSpeed(), ~resonance=currentResonance()) {
+        | Some(_) => retune(~f, ~k, ~hz=Macro.normToHz(n), ~resonance=currentResonance())
+        | None =>
+          send(Speed, Param.fromNormalised(Speed, n))
+          refreshDerived()
+        }
+      },
+      ~onGestureStart=tuningStart,
+      ~onGestureEnd=tuningEnd,
+    ),
+    ring: Knob.make(
+      ~label="Ring",
+      ~title="How long it rings. The last part of the turn sustains itself.",
+      ~defaultValue=Macro.resonanceToRing(init(Feedback)),
+      ~onChange=n =>
+        retune(~f=currentF(), ~k=currentK(), ~hz=heldPitch(), ~resonance=Macro.ringToResonance(n)),
+      ~onGestureStart=tuningStart,
+      ~onGestureEnd=tuningEnd,
+    ),
+    color: Knob.make(
+      ~label="Color",
+      ~title="Where along the resonant band: towards the chaotic corner on the left, towards the saddle-node apex on the right. The pitch stays put.",
+      ~defaultValue=initColor,
+      ~onChange=moveOnBand,
+      ~onGestureStart=colorStart,
+      ~onGestureEnd=colorEnd,
+    ),
+    drive: paramKnob(Drive, ~label="Drive", ~title="How hard the input pushes the chemistry"),
+    mix: paramKnob(Mix, ~label="Mix", ~title="Dry and wet"),
+    output: paramKnob(OutputGain, ~label="Output", ~title="Output level"),
+  }
+  knobsRef := Some(knobs)
+  // a double right-click on a knob that is one parameter opens the host's menu for it
+  hostMenu->HostMenu.attach(knobs.pitch.element, Param.id(Speed))
+  hostMenu->HostMenu.attach(knobs.ring.element, Param.id(Feedback))
+  hostMenu->HostMenu.attach(knobs.drive.element, Param.id(Drive))
+  hostMenu->HostMenu.attach(knobs.mix.element, Param.id(Mix))
+  hostMenu->HostMenu.attach(knobs.output.element, Param.id(OutputGain))
+
+  let knobRow = div(~className="knobs")
+  [knobs.pitch, knobs.ring, knobs.color, knobs.drive, knobs.mix, knobs.output]->Array.forEach(k =>
+    knobRow->appendChild(k.element)
+  )
+
+  let playPage = div(~className="page play")
+  playPage->appendChild(playLattice.element)
+  playPage->appendChild(response.element)
+  playPage->appendChild(knobRow)
+
+  //==============================================================================
+  // Lab page
+
+  let reseed = button(
+    ~text="Reseed lattice",
+    ~title="Put the ring back at rest for the current chemistry",
+  )
+  reseed->addEventListener("click", _ => Bridge.reseed(bridge))
+  let (controls, labSliders) = Controls.make(
+    bridge,
+    ~hostMenu,
+    ~onLocalChange=(param, value) => {
+      applyValue(param, value)
+      refreshDerived()
+    },
+    ~extra=reseed,
+  )
+  sliders := labSliders
+
+  let main = createElement("main")
+  main->appendChild(phase.element)
+  main->appendChild(labLattice.element)
+  let labPage = div(~className="page lab")
+  labPage->appendChild(main)
+  labPage->appendChild(controls)
+
+  root->appendChild(header)
+  root->appendChild(playPage)
+  root->appendChild(labPage)
+
+  //==============================================================================
+  // Pages
+
+  let showPage = (page, ~remember) => {
+    app.page = page
+    playPage->toggleClass("on", page == Play)
+    labPage->toggleClass("on", page == Lab)
+    playButton->toggleClass("on", page == Play)
+    labButton->toggleClass("on", page == Lab)
+    // what was hidden may be stale
+    playLattice.dirty = true
+    labLattice.dirty = true
+    response.dirty = true
+    phase.dirty = true
+    invalidate(app)
+    if remember && settings->Settings.available {
+      settings->Settings.save("page", String(page == Lab ? "lab" : "play"))
+    }
+  }
+  playButton->addEventListener("click", _ => showPage(Play, ~remember=true))
+  labButton->addEventListener("click", _ => showPage(Lab, ~remember=true))
+  showPage(Play, ~remember=false)
+  // the page you were last on, once the CLAP plugin has answered with the settings
+  let restoredPage = ref(false)
+  let stopPageSetting = settings->Settings.listen(() =>
+    if !restoredPage.contents {
+      restoredPage := true
+      switch settings.saved->Option.flatMap(Dict.get(_, "page")) {
+      | Some(String("lab")) => showPage(Lab, ~remember=false)
+      | _ => ()
+      }
+    }
+  )
+
+  //==============================================================================
   // Scaling: the stage keeps the design size, scaled to fit the window and centred in it.
+
   let supportsZoom = cssSupports("zoom", "2")
   let layout = () => {
     let orDesign = (x, design) => x == 0. ? design : x
@@ -363,27 +783,26 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
   resizeObserver->observe(host)
   layout()
 
+  //==============================================================================
   // Host → GUI
-  Bridge.onParameterChange(bridge, (param, value) =>
-    switch param {
-    | Feed => PhasePlot.setFK(phase, ~f=value, ~k=phase.k)
-    | Kill => PhasePlot.setFK(phase, ~f=phase.f, ~k=value)
-    | other =>
-      sliderFor(other)->Option.forEach(s => Controls.show(s, value))
-      if other == Speed {
-        PhasePlot.setSpeed(phase, value)
-      }
-    }
-  )
+
+  Bridge.onParameterChange(bridge, (param, value) => {
+    applyValue(param, value)
+    refreshDerived()
+  })
   Bridge.onLatticeFrame(bridge, frame => {
-    LatticeView.pushFrame(lattice, frame)
+    LatticeView.pushFrame(labLattice, frame)
+    LatticeView.pushFrame(playLattice, frame)
     app.level = frame.level
   })
 
+  refreshDerived()
   app.cleanups = [
     () => resizeObserver->disconnect,
     restoreBrowserChrome,
     stopSizeControl,
+    stopPresetMenu,
+    stopPageSetting,
     () => settings->Settings.dispose,
     () => hostMenu->HostMenu.dispose,
   ]

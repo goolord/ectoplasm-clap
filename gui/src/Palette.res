@@ -1,5 +1,6 @@
-// Cold-steel palette: near-neutral gunmetal grounds with a faint blue cast,
-// concentration rendered as a value ramp from blackened steel to ice.
+// Cold steel with an ectoplasm glow: near-neutral gunmetal grounds with a faint blue cast, a
+// green accent, and concentration rendered as a value ramp from blackened steel up to a pale
+// green glow.
 // Every colour the GUI uses lives here.
 
 type rgb = (int, int, int)
@@ -28,9 +29,9 @@ let inkRgb: rgb = (221, 228, 234) // primary text
 let inkMutedRgb: rgb = (138, 150, 163) // secondary text
 
 // Accents
-let accentRgb: rgb = (159, 195, 222) // brand mark, slider thumbs, V profile line
+let accentRgb: rgb = (137, 222, 152) // ectoplasm green: brand mark, knobs, thumbs, V profile line
 let activeRgb: rgb = (230, 238, 244) // the thing under your hand: puck, pickups, Hopf curve
-let oscillationRgb: rgb = (127, 198, 192) // measured self-oscillation
+let oscillationRgb: rgb = (164, 240, 170) // measured self-oscillation
 let fillRgb: rgb = (74, 90, 108) // V profile fill
 
 let slide = hex(slideRgb)
@@ -66,8 +67,8 @@ let rampStops: array<(float, rgb)> = [
   (0.00, wellRgb),
   (0.30, (38, 47, 58)),
   (0.55, (76, 95, 115)),
-  (0.78, (146, 170, 192)),
-  (1.00, (238, 244, 248)),
+  (0.78, (128, 170, 158)),
+  (1.00, (214, 246, 222)),
 ]
 
 let lerp = (a, b, t) => Float.toInt(Int.toFloat(a) +. (Int.toFloat(b) -. Int.toFloat(a)) *. t)

@@ -53,7 +53,7 @@ Across the whole box $F \in [0.010, 0.090]$, $K \in [0.045, 0.070]$, $\lvert\lam
 * $u' \ge 0$ needs $\Delta t\,(D_u + v^2 + F) \le 1$, which holds while $v \lesssim 0.64$.
 * For the homogeneous mode, $w = u + v$ obeys $\dot w = F(1-u) - (F+K)v \le F(1-w)$, so $w$ stays at or below 1.
 
-So the unforced dynamics live in $[0,1]^2$. The cubic term $u v^2$ is bounded by 1 there, and nothing can overflow. Only the forcing term $s_i$ can push a node outside the box: drive up to +24 dB plus feedback up to 1.5 adds at most about 0.1 per sample. `softClamp` handles that case:
+So the unforced dynamics live in $[0,1]^2$. The cubic term $u v^2$ is bounded by 1 there, and nothing can overflow. Only the forcing term $s_i$ can push a node outside the box: the input adds at most 0.003 × Drive (×16 at +24 dB) ≈ 0.05 per sample. `softClamp` handles that case:
 
 * $[10^{-12}, 0.9]$ maps to itself.
 * Above 0.9 is a C¹ tanh knee with an asymptote at 1.25, which caps $u v^2 \le 1.95$.
@@ -70,6 +70,10 @@ So no lattice value can be non-finite after any step, whatever the input. As a f
 | Lower clamp at 0 | A negative $v$ makes $u v^2 > 0$ in the U equation while $-(F+K)v$ adds to V. Under strong drive, overshoot can compound until it overflows. |
 | Upper clamp | With $\Delta t = 1$ and $v \gtrsim 1.5$ the cubic term overshoots: $v' \approx v^3$, which overflows float32 in about 6 steps. |
 | Denormal flush | Not a correctness bug, but decaying regimes spend thousands of samples in subnormal arithmetic. On x86 without FTZ/DAZ that is a 10–100× CPU spike. |
+
+### Resonance (anti-damping)
+
+Resonance adds $\Delta t\, g\, A\,d/(A + \lvert d\rvert)$ to $v$ each step, where $d = v - V^*$ and $A = 0.004$. Here $g = r\,g_\text{edge}$, where $g_\text{edge}$ is the discrete edge of the homogeneous focus (README, *Resonance*) and $r \le 1.5$. Over the whole F×K box $g_\text{edge} \le 0.242$ (computed on a grid; the maximum is at F = 0.0895, K = 0.045, dt = 1), so the term is at most $1.5 \times 0.242 \times A \approx 1.5\times10^{-3}$ per step, whatever $d$ is. It can't overflow anything, and it leaves the invariant-region argument above intact up to that small forcing. Past $r = 1$ the focus grows. The saturation turns that into a limit cycle of amplitude about $A$, instead of the subcritical swing out of the focus's basin and collapse to the trivial state that Gray-Scott does by itself.
 
 ## 3. Float32 specifics
 
@@ -102,7 +106,7 @@ The phase plane in the GUI shows these regions. Numbers are for the default $D_u
 | Region | Rough location | What you hear |
 |---|---|---|
 | Chaos | left of the Hopf curve, F ≲ 0.025, K ≲ 0.0525 | Self-oscillating, broadband, never settles |
-| Drones | a 0.01-wide strip just right of the Hopf curve | Tuned resonator with high Q; sustains at Resonance ≳ 1. Default lives here (Q ≈ 12, 345 Hz). |
+| Drones | a 0.01-wide strip just right of the Hopf curve | Tuned resonator; Resonance lengthens the ring and sustains past 1. The Play page's Color knob keeps F 0.004 right of the Hopf curve, inside this strip; the default is here (302 Hz, ~0.5 s). |
 | Stripes | just below the saddle-node curve | Turing patterns (if ratio < 1); strong, gritty resonance |
 | Damped | low K, high F | Uniform state; short plucky rings |
 | Spots / Solitons | just above the saddle-node curve | Input triggers localised spots or pulses; quieter |

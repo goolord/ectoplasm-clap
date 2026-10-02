@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { patchSource } from "../patch-source.mjs";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const cmaj = process.env.CMAJ ?? "cmaj";
@@ -37,23 +38,6 @@ for (const rate of [44100, 48000, 96000]) {
 }
 const selected = cases.filter((c) => c.name.includes(filter));
 
-// --- source patching -----------------------------------------------------------------
-const internals = { feed: ["feedT", "feedS"], kill: ["killT", "killS"], diffusionU: ["duT", "duS"],
-  diffusionRatio: ["ratioT", "ratioS"], speed: ["speedT", "speedS"], tapDistance: ["distT", "distS"],
-  feedback: ["fbT", "fbS"], mix: ["mixT", "mixS"], drive: ["driveT", "driveS"] };
-
-function patchSource(params) {
-  let s = source;
-  for (const [name, value] of Object.entries(params)) {
-    const annotation = new RegExp(String.raw`(float ${name}\s+\[\[[^\]]*init: )[-0-9.]+`);
-    if (!annotation.test(s)) throw new Error(`no parameter ${name}`);
-    s = s.replace(annotation, `$1${Number(value).toFixed(6)}`);
-    const internal = name === "drive" ? Math.pow(10, value / 20) : value;
-    for (const v of internals[name] ?? [])
-      s = s.replace(new RegExp(String.raw`\b${v} = [-0-9.]+f`), `${v} = ${Number(internal).toFixed(6)}f`);
-  }
-  return s;
-}
 
 // --- signals -------------------------------------------------------------------------
 // 4 s: 1 s of silence (`cmaj render` drops roughly the first 0.4 s of its input), a 0.5 s
@@ -97,7 +81,7 @@ for (const rate of new Set(selected.map((c) => c.rate))) {
 async function run(c, index) {
   const dir = path.join(work, `case${index}`);
   fs.mkdirSync(dir);
-  fs.writeFileSync(path.join(dir, "t.cmajor"), patchSource(c.params));
+  fs.writeFileSync(path.join(dir, "t.cmajor"), patchSource(source, c.params));
   fs.writeFileSync(path.join(dir, "t.cmajorpatch"),
     JSON.stringify({ CmajorVersion: 1, ID: `dev.gsr.stability${index}`, version: "1", name: "stability", source: "t.cmajor" }));
   const out = path.join(dir, "out.wav");

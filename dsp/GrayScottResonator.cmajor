@@ -10,15 +10,13 @@
 
     Signal flow (per sample, per channel):
 
-        in ──drive──tanh──┐
-                          ├──► B-spline splat into V at the injector
-        cross-feedback ───┘
+        in ──tanh──×drive──► B-spline splat into V at the injector
                                    │
-                [ 128-node ring, explicit Euler, 1-8 sub-steps, soft-clamped ]
+                [ 128-node ring, explicit Euler, 1-8 sub-steps, soft-clamped,
+                  Resonance as anti-damping around the homogeneous state ]
                                    │
         pickup (cubic B-spline) ◄──┘
-          └─► DC block ─► 2-pole LP ─► fixed gain ─┬─► tanh ─► feedback
-                                                   └─► level match ─► tanh ─► dry/wet ─► gain ─► out
+          └─► DC block ─► 2-pole LP ─► fixed gain ─► level match ─► tanh ─► dry/wet ─► gain ─► out
 
     How it resonates: between the Hopf and saddle-node curves of the F×K
     plane the homogeneous state (U*, V*) is a stable focus, so the lattice
@@ -35,8 +33,21 @@
     ever boosts, and freezes while there is no input, so it can't lift noise,
     stretch tails, or pump. (An AGC inside the loop did pump: it raised the loop
     gain whenever things went quiet, turning the ring into a relaxation
-    oscillator that clicked on its own clock.) The feedback path uses the
-    fixed-gain signal, so Resonance means the same thing everywhere.
+    oscillator that clicked on its own clock.)
+
+    Resonance is anti-damping inside the chemistry, not an audio feedback loop:
+    each step adds g·A·d/(A + |d|) to V, with d = V − V*. That raises the
+    Jacobian's trace by g, so the focus rings longer at nearly the same pitch;
+    the saturation at A turns what would be Gray-Scott's subcritical Hopf
+    (a growing ring swings out of the focus's basin and collapses) into a small,
+    stable limit cycle. g is normalised so Resonance means the same thing
+    everywhere on the band: 0 is the natural damping, 1 is exactly the edge of
+    oscillation for the integrator as it runs, and above 1 the ring sustains
+    itself (see updateAntiDamping). The GUI's pitch and ring-time readouts do the
+    same arithmetic (gui/src/Macro.res). Audio feedback from the pickups, which
+    this replaced, couldn't keep the pitch: the lattice has a lot of gain near
+    DC, so the loop found a lower mode of its own (106 Hz where the focus was at
+    345 Hz).
 
     Time is normalised to a 48 kHz reference, so a given Speed gives the same
     pitch at any host sample rate.
@@ -59,10 +70,15 @@ namespace GrayScott
     let maxSubSteps = 8;          // Speed 4 at 24 kHz still gets dt ≤ 1
     let referenceRate = 48000.0f; // the lattice's time base
 
-    /// Peak V added per sample at an injector for a full-scale excitation.
-    /// ~0.02 keeps the lattice in its linear (resonant-filter) regime; Drive
-    /// pushes it past that into pulse-triggering, pattern-breaking territory.
-    let injectionGain = 0.04f;
+    /// Peak V added per sample at an injector for a full-scale input at Drive
+    /// 0 dB. Small enough that the ring stays a linear resonator around its
+    /// focus, so it rings at the pitch the GUI shows; Drive (up to ×16)
+    /// pushes it out of that into nonlinear, pattern-breaking territory.
+    let injectionGain = 0.003f;
+
+    /// Amplitude (in V) at which Resonance's anti-damping saturates. Small
+    /// enough that a self-oscillating ring stays well inside the focus's basin.
+    let resonanceLimit = 0.004f;
 
     /// Furthest a pickup sits from its injector, in nodes. At audio rates a
     /// diffusive lattice only carries a signal ~√(2D/ω) ≈ 3-4 nodes before it is
@@ -75,9 +91,7 @@ namespace GrayScott
     /// level, so this is close to unity.
     let wetGain = 1.5f;
 
-    /// Scales Resonance so that ~1 is where the default focus starts to
-    /// sustain itself.
-    let feedbackGain = 2.0f;
+
 
     /// Most the level match will boost the wet signal (+30 dB).
     let maxLevelMatch = 31.6f;
@@ -103,14 +117,14 @@ namespace GrayScott
 
         input event
         {
-            float feed            [[ name: "Feed (F)",          min: 0.010, max: 0.090, init: 0.0420, step: 0.0001 ]];
-            float kill            [[ name: "Kill (K)",          min: 0.045, max: 0.070, init: 0.0585, step: 0.0001 ]];
+            float feed            [[ name: "Feed (F)",          min: 0.010, max: 0.090, init: 0.04462 ]];
+            float kill            [[ name: "Kill (K)",          min: 0.045, max: 0.070, init: 0.0585 ]];
             float diffusionU      [[ name: "Diffusion U",       min: 0.05,  max: 0.50,  init: 0.40 ]];
-            float diffusionRatio  [[ name: "Diffusion Ratio",   min: 0.10,  max: 1.00,  init: 0.60 ]];
+            float diffusionRatio  [[ name: "Diffusion Ratio",   min: 0.10,  max: 1.00,  init: 1.00 ]];
             float speed           [[ name: "Speed",             min: 0.05,  max: 4.00,  init: 1.00 ]];
-            float drive           [[ name: "Drive",             min: 0.0,   max: 24.0,  init: 6.0,  unit: "dB" ]];
+            float drive           [[ name: "Drive",             min: 0.0,   max: 24.0,  init: 0.0,  unit: "dB" ]];
             float tapDistance     [[ name: "Pickup Distance",   min: 0.0,   max: 1.0,   init: 0.3 ]];
-            float feedback        [[ name: "Resonance",         min: 0.0,   max: 1.5,   init: 0.5 ]];
+            float feedback        [[ name: "Resonance",         min: 0.0,   max: 1.5,   init: 0.93 ]];
             float mix             [[ name: "Mix",               min: 0.0,   max: 1.0,   init: 1.0 ]];
             float outputGain      [[ name: "Output",            min: -36.0, max: 12.0,  init: -6.0, unit: "dB" ]];
         }
@@ -139,17 +153,21 @@ namespace GrayScott
         float[numNodes] u, v;
 
         // Parameter targets (set by events) and their smoothed per-sample values
-        float feedT = 0.042f, killT = 0.0585f, duT = 0.40f, ratioT = 0.6f, speedT = 1.0f,
-              driveT = 2.0f, distT = 0.3f, fbT = 0.5f, mixT = 1.0f, gainT = 0.5f;
+        float feedT = 0.04462f, killT = 0.0585f, duT = 0.40f, ratioT = 1.0f, speedT = 1.0f,
+              driveT = 1.0f, distT = 0.3f, fbT = 0.93f, mixT = 1.0f, gainT = 0.5f;
 
-        float feedS = 0.042f, killS = 0.0585f, duS = 0.40f, ratioS = 0.6f, speedS = 1.0f,
-              driveS = 2.0f, distS = 0.3f, fbS = 0.5f, mixS = 1.0f, gainS = 0.5f;
+        float feedS = 0.04462f, killS = 0.0585f, duS = 0.40f, ratioS = 1.0f, speedS = 1.0f,
+              driveS = 1.0f, distS = 0.3f, fbS = 0.93f, mixS = 1.0f, gainS = 0.5f;
 
         float smoothCoeff;
         float rateScale;             // referenceRate / sample rate
 
+        // Resonance: anti-damping g·(V − V*), updated every 64 samples
+        float antiDamping, vStar;
+        int framesUntilFocusUpdate;
+
         // Output conditioning
-        float<2> dcX1, dcY1, lpZ1, lpZ2, lastWet;
+        float<2> dcX1, dcY1, lpZ1, lpZ2;
         float dcCoeff, lpB0, lpB1, lpB2, lpA1, lpA2;
         float levelFollower;
 
@@ -234,12 +252,16 @@ namespace GrayScott
                 let tapL = injL + dist;
                 let tapR = injR - dist;
 
-                // Excitation: driven, soft-saturated input plus cross-coupled feedback
-                // from the previous output (L pickup feeds the R injector and vice
-                // versa, so energy circulates around the ring).
+                if (--framesUntilFocusUpdate <= 0)
+                {
+                    framesUntilFocusUpdate = 64;
+                    updateAntiDamping (dt);
+                }
+
+                // Excitation: the soft-saturated input, scaled by Drive
                 let x = in;
-                let excL = tanh (driveS * x[0]) + feedbackGain * fbS * lastWet[1];
-                let excR = tanh (driveS * x[1]) + feedbackGain * fbS * lastWet[0];
+                let excL = driveS * tanh (x[0]);
+                let excR = driveS * tanh (x[1]);
 
                 // The excitation is added straight into V, once per sample.
                 splat (injL, injectionGain * excL);
@@ -263,9 +285,7 @@ namespace GrayScott
                 }
                 else
                 {
-                    let fade = wetFade;
-                    lastWet = tanh (raw) * fade;
-                    wet = tanh (raw * matchLevel (x, raw)) * fade;
+                    wet = tanh (raw * matchLevel (x, raw)) * wetFade;
                 }
 
                 wetFade = min (1.0f, wetFade + wetFadeStep);
@@ -294,6 +314,8 @@ namespace GrayScott
         float integrate (float dt, float F, float K, float du, float dv)
         {
             var mass = 0.0f;
+            let dtG = dt * antiDamping;
+            let limit = resonanceLimit;
             let u0 = u[0];
             let v0 = v[0];
             var uLeft = u[numNodes - 1];
@@ -313,7 +335,7 @@ namespace GrayScott
                 let reaction = dt * uc * vc * vc;
 
                 let un = decayU * uc + dtF + dtDu * (0.5f * (uLeft + uRight) - uc) - reaction;
-                let vn = decayV * vc + dtDv * (0.5f * (vLeft + vRight) - vc) + reaction;
+                let vn = decayV * vc + dtDv * (0.5f * (vLeft + vRight) - vc) + reaction + dtG * softLimit (vc - vStar, limit);
 
                 uLeft = uc;
                 vLeft = vc;
@@ -328,7 +350,7 @@ namespace GrayScott
                 let reaction = dt * uc * vc * vc;
 
                 let un = decayU * uc + dtF + dtDu * (0.5f * (uLeft + u0) - uc) - reaction;
-                let vn = decayV * vc + dtDv * (0.5f * (vLeft + v0) - vc) + reaction;
+                let vn = decayV * vc + dtDv * (0.5f * (vLeft + v0) - vc) + reaction + dtG * softLimit (vc - vStar, limit);
 
                 u[numNodes - 1] = softClamp (un);
                 v[numNodes - 1] = softClamp (vn);
@@ -336,6 +358,18 @@ namespace GrayScott
             }
 
             return mass;
+        }
+
+        /// d, saturating smoothly at ±limit: linear for small deviations, so the
+        /// anti-damping sharpens the focus's Q, but bounded for large ones, so a
+        /// self-oscillating ring settles into a limit cycle of about ±limit
+        /// instead of swinging out of the focus's basin (Gray-Scott's Hopf
+        /// bifurcation is subcritical) and collapsing to the trivial state. The
+        /// gradual roll-off matters: a hard clamp keeps pushing at full strength
+        /// past ±limit, and the ring collapses anyway.
+        float softLimit (float d, float limit)
+        {
+            return limit * d / (limit + abs (d));
         }
 
         /// Keeps a concentration physical. Identity on [1e-12, 0.9], then a C¹
@@ -453,6 +487,30 @@ namespace GrayScott
             return levelMatch;
         }
 
+        /// Resonance as anti-damping, normalised so Resonance 1 is exactly the
+        /// edge of oscillation for the integrator as it runs (dt per sub-step).
+        /// Explicit Euler multiplies a mode by z = 1 + λ·dt, which grows by about
+        /// ω²·dt/2 per step on its own, so the edge is where |z| = 1, not where
+        /// Re λ = 0. Adding g to the Jacobian's V–V entry makes the trace
+        /// trace + g and the determinant det − g·(V*² + F), and |z|² = 1 solves to
+        ///     g_edge = −(trace + det·dt) / (1 − (V*² + F)·dt).
+        /// None where there's no stable focus to sharpen.
+        void updateAntiDamping (float dt)
+        {
+            let state = homogeneousState (feedS, killS);
+            vStar = state[1];
+            antiDamping = 0.0f;
+
+            if (vStar > 0.0f)
+            {
+                let v2 = vStar * vStar;
+                let trace = killS - v2;
+                let det = (feedS + killS) * (v2 - feedS);
+                let edge = -(trace + det * dt) / (1.0f - (v2 + feedS) * dt);
+                antiDamping = fbS * max (0.0f, edge);
+            }
+        }
+
         bool isFiniteVector (float<2> x)
         {
             // NaN fails every comparison, ±Inf fails the magnitude test
@@ -497,7 +555,6 @@ namespace GrayScott
             dcY1 = float<2>();
             lpZ1 = float<2>();
             lpZ2 = float<2>();
-            lastWet = float<2>();
             deadSamples = 0;
             wetFade = 0.0f;
         }

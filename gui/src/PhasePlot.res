@@ -42,6 +42,7 @@ type t = {
   mutable f: float,
   mutable k: float,
   mutable speed: float,
+  mutable resonance: float,
   mutable dragging: bool,
   mutable dirty: bool,
   // asks the app for a repaint (it renders on demand, not every frame)
@@ -248,15 +249,10 @@ let updateReadout = plot => {
   )
   setTextContent(
     plot.resonanceLabel,
-    switch T.resonance(~f=plot.f, ~k=plot.k) {
-    | Some({selfOscillating: true, hertzPerUnitSpeed}) =>
-      "Oscillates near " ++ Float.toFixed(hertzPerUnitSpeed *. plot.speed, ~digits=0) ++ " Hz"
-    | Some({hertzPerUnitSpeed, q}) =>
-      "Rings at " ++
-      Float.toFixed(hertzPerUnitSpeed *. plot.speed, ~digits=0) ++
-      " Hz, " ++ (
-        q > 100.0 ? "right on the edge of oscillation" : "Q " ++ Float.toFixed(q, ~digits=q < 10.0 ? 1 : 0)
-      )
+    switch Macro.focus(~f=plot.f, ~k=plot.k, ~speed=plot.speed, ~resonance=plot.resonance) {
+    | Some({hz, ringSeconds: None}) => "Sustains at " ++ Macro.formatHz(hz)
+    | Some({hz, ringSeconds: Some(s)}) =>
+      "Rings at " ++ Macro.formatHz(hz) ++ ", fades 60 dB in " ++ Macro.formatSeconds(s)
     | None => "No resonant focus here"
     },
   )
@@ -299,6 +295,11 @@ let setFK = (plot, ~f, ~k) => {
   plot.f = clampF(f)
   plot.k = clampK(k)
   markDirty(plot)
+  updateReadout(plot)
+}
+
+let setResonance = (plot, resonance) => {
+  plot.resonance = resonance
   updateReadout(plot)
 }
 
@@ -351,6 +352,7 @@ let make = (
     f: CmajorBindings.Param.spec(Feed).init,
     k: CmajorBindings.Param.spec(Kill).init,
     speed: 1.0,
+    resonance: CmajorBindings.Param.spec(Feedback).init,
     dragging: false,
     dirty: true,
     invalidate: () => (),

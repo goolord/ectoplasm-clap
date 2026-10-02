@@ -5,7 +5,7 @@
 #                   asks for administrator rights)
 #   just play       run the patch in Cmajor's player
 #   just preview    serve the view against a mock host (tools/gui-harness.html), for working on the UI
-#   just test       stress-render the lattice (tools/test/stability.mjs) and render the whole plugin
+#   just test       stress-render the lattice, check the presets, and render the whole plugin
 #   just measure    re-measure the F×K map the phase plane shows (after changing the DSP)
 #   just rename "My Plugin" com.me.myplugin   change the plugin's name and IDs
 #
@@ -133,9 +133,11 @@ play: ui
 preview: ui
     node "{{ root / "tools" / "serve.mjs" }}"
 
-# Stress-render the lattice (a filter picks cases by name) and render the whole plugin
-test filter="":
+# Stress-render the lattice (a filter picks cases by name), check every preset does what the
+# Play view says, and render the whole plugin
+test filter="": ui
     node "{{ root / "tools" / "test" / "stability.mjs" }}" "{{ filter }}"
+    node "{{ root / "tools" / "test" / "presets.mjs" }}"
     node "{{ root / "tools" / "test" / "plugin.mjs" }}"
 
 # Re-measure the processor across the F×K plane and rebuild the phase plane's dot field

@@ -1,5 +1,5 @@
 {
-  "name": "gray-scott-resonator-gui",
+  "name": "ectoplasm",
   "sources": [{ "dir": "gui/src", "subdirs": false }],
   "package-specs": [{ "module": "esmodule", "in-source": true }],
   "suffix": ".res.mjs",

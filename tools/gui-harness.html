@@ -21,8 +21,8 @@ import createPatchView from "../gui/dist/index.js";
 
 const N = 128;
 const log = (...a) => { const el = document.getElementById("log"); el.textContent += a.join(" ") + "\n"; el.scrollTop = 1e9; };
-const params = { feed: 0.042, kill: 0.059, diffusionU: 0.4, diffusionRatio: 0.6, speed: 1, drive: 6,
-                 tapDistance: 0.3, feedback: 0.25, mix: 0.8, outputGain: -6 };
+const params = { feed: 0.04462, kill: 0.0585, diffusionU: 0.4, diffusionRatio: 1.0, speed: 1, drive: 0,
+                 tapDistance: 0.3, feedback: 0.93, mix: 1.0, outputGain: -6 };
 const u = new Float32Array(N), v = new Float32Array(N);
 let rng = 12345; const rnd = () => (rng = (rng * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
 function homogeneous(F, K) { const FK = F + K, d = F * F - 4 * F * FK * FK; if (d <= 0) return null; const vs = (F + Math.sqrt(d)) / (2 * FK); return [FK / vs, vs]; }

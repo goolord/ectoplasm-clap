@@ -15,6 +15,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { execFile } from 'child_process';
+import { patchSource } from "./patch-source.mjs";
 
 const here = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
 const root = path.resolve(here, '..');
@@ -40,23 +41,6 @@ function writeInput(file) {
   fs.writeFileSync(file, buf);
 }
 
-// --- source patching -------------------------------------------------------------
-const internals = { feed: ['feedT', 'feedS'], kill: ['killT', 'killS'], diffusionU: ['duT', 'duS'],
-  diffusionRatio: ['ratioT', 'ratioS'], speed: ['speedT', 'speedS'], tapDistance: ['distT', 'distS'],
-  feedback: ['fbT', 'fbS'], mix: ['mixT', 'mixS'], drive: ['driveT', 'driveS'] };
-
-function patchSource(params) {
-  let s = source;
-  for (const [name, value] of Object.entries(params)) {
-    const annotation = new RegExp(String.raw`(float ${name}\s+\[\[[^\]]*init: )[-0-9.]+`);
-    if (!annotation.test(s)) throw new Error(`no parameter ${name}`);
-    s = s.replace(annotation, `$1${Number(value).toFixed(6)}`);
-    const internal = name === 'drive' ? Math.pow(10, value / 20) : value;
-    for (const v of internals[name] ?? [])
-      s = s.replace(new RegExp(String.raw`\b${v} = [-0-9.]+f`), `${v} = ${Number(internal).toFixed(6)}f`);
-  }
-  return s;
-}
 
 // --- analysis --------------------------------------------------------------------
 function readFloatWav(file) {
@@ -88,7 +72,7 @@ async function worker(id) {
   fs.mkdirSync(dir);
   while (next < cells.length) {
     const cell = cells[next++];
-    fs.writeFileSync(path.join(dir, 't.cmajor'), patchSource({ ...base, feed: cell.F, kill: cell.K }));
+    fs.writeFileSync(path.join(dir, 't.cmajor'), patchSource(source, { ...base, feed: cell.F, kill: cell.K }));
     fs.writeFileSync(path.join(dir, 't.cmajorpatch'),
       JSON.stringify({ CmajorVersion: 1, ID: `dev.gsr.measure${id}`, version: '1', name: 'measure', source: 't.cmajor' }));
     await new Promise((resolve, reject) => execFile('cmaj',

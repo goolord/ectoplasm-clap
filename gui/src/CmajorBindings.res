@@ -87,7 +87,7 @@ module Param = {
 
   let spec = p =>
     switch p {
-    | Feed => {id: "feed", label: "Feed F", min: 0.010, max: 0.090, init: 0.042, format: fixed(4, "")}
+    | Feed => {id: "feed", label: "Feed F", min: 0.010, max: 0.090, init: 0.04462, format: fixed(4, "")}
     | Kill => {id: "kill", label: "Kill K", min: 0.045, max: 0.070, init: 0.0585, format: fixed(4, "")}
     | DiffusionU => {
         id: "diffusionU",
@@ -102,11 +102,11 @@ module Param = {
         label: "Dv / Du",
         min: 0.10,
         max: 1.00,
-        init: 0.60,
+        init: 1.00,
         format: fixed(2, ""),
       }
     | Speed => {id: "speed", label: "Speed", min: 0.05, max: 4.0, init: 1.0, format: fixed(2, "×")}
-    | Drive => {id: "drive", label: "Drive", min: 0.0, max: 24.0, init: 6.0, format: decibels}
+    | Drive => {id: "drive", label: "Drive", min: 0.0, max: 24.0, init: 0.0, format: decibels}
     | TapDistance => {
         id: "tapDistance",
         label: "Pickup distance",
@@ -120,7 +120,7 @@ module Param = {
         label: "Resonance",
         min: 0.0,
         max: 1.5,
-        init: 0.5,
+        init: 0.93,
         format: fixed(2, ""),
       }
     | Mix => {id: "mix", label: "Mix", min: 0.0, max: 1.0, init: 1.0, format: percent}
