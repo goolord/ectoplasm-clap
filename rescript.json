@@ -1,0 +1,8 @@
+{
+  "name": "gray-scott-resonator-gui",
+  "sources": [{ "dir": "gui/src", "subdirs": false }],
+  "package-specs": [{ "module": "esmodule", "in-source": true }],
+  "suffix": ".res.mjs",
+  "warnings": { "error": "+8+101" },
+  "compiler-flags": []
+}

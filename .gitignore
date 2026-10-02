@@ -1,0 +1,31 @@
+# Build output: the generated CLAP project, CMake's build, the test renders, the plugin
+build/
+dist/
+
+# The compiled interface (ReScript output and the bundle the manifest loads)
+/gui/dist/
+*.res.mjs
+/lib/
+.bsb.lock
+
+# JavaScript dependencies
+node_modules/
+.npm/
+package-lock.json
+.cache/
+
+# Logs
+npm-debug.log*
+
+# Operating systems
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# AI
+.claude

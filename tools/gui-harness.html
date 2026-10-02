@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GSR GUI harness</title>
+<style>
+  html, body { margin: 0; background: #0b0d10; }
+  #frame { width: 880px; height: 560px; margin: 16px; outline: 1px dashed #333; }
+  #log { margin: 0 16px; font: 11px monospace; color: #7d8794; white-space: pre; height: 120px; overflow: auto; }
+</style>
+</head>
+<body>
+<div id="frame"></div>
+<div id="log"></div>
+<script type="module">
+// Mock PatchConnection: no audio. Runs a JS port of the processor's lattice
+// update (same Euler step, soft clamp, homogeneous seeding) so the GUI can be
+// exercised in a plain browser.
+import createPatchView from "../gui/dist/index.js";
+
+const N = 128;
+const log = (...a) => { const el = document.getElementById("log"); el.textContent += a.join(" ") + "\n"; el.scrollTop = 1e9; };
+const params = { feed: 0.042, kill: 0.059, diffusionU: 0.4, diffusionRatio: 0.6, speed: 1, drive: 6,
+                 tapDistance: 0.3, feedback: 0.25, mix: 0.8, outputGain: -6 };
+const u = new Float32Array(N), v = new Float32Array(N);
+let rng = 12345; const rnd = () => (rng = (rng * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+function homogeneous(F, K) { const FK = F + K, d = F * F - 4 * F * FK * FK; if (d <= 0) return null; const vs = (F + Math.sqrt(d)) / (2 * FK); return [FK / vs, vs]; }
+// exactly on the steady state, as the processor does: silent until the input disturbs it
+function seed() {
+  const h = homogeneous(params.feed, params.kill);
+  for (let i = 0; i < N; i++) { u[i] = h ? h[0] : 1; v[i] = h ? h[1] : 0; }
+}
+const soft = x => x > 0.9 ? 0.9 + 0.35 * Math.tanh((x - 0.9) / 0.35) : (x < 1e-12 ? 0 : x);
+function step(dt) {
+  const F = params.feed, K = params.kill, du = params.diffusionU, dv = du * params.diffusionRatio;
+  const u0 = u[0], v0 = v[0]; let uL = u[N - 1], vL = v[N - 1];
+  for (let i = 0; i < N; i++) {
+    const uc = u[i], vc = v[i], uR = i === N - 1 ? u0 : u[i + 1], vR = i === N - 1 ? v0 : v[i + 1];
+    const r = uc * vc * vc;
+    const un = uc + dt * (du * (0.5 * (uL + uR) - uc) - r + F * (1 - uc));
+    const vn = vc + dt * (dv * (0.5 * (vL + vR) - vc) + r - (F + K) * vc);
+    uL = uc; vL = vc; u[i] = soft(un); v[i] = soft(vn);
+  }
+}
+// Simulated input: occasional noise bursts into the injectors
+function inject(t) {
+  const burst = (Math.floor(t / 1500) % 2 === 0) ? 0.02 : 0;
+  for (const c of [32, 96]) for (let j = -1; j <= 2; j++) v[(c + j + N) % N] = soft(v[(c + j + N) % N] + burst * (2 * rnd() - 1));
+}
+seed();
+
+const allListeners = new Set(), endpointListeners = new Map();
+const connection = {
+  sendEventOrValue(id, value) {
+    if (id === "reseed") { log("event reseed"); seed(); return; }
+    if (!(id in params)) { log("UNKNOWN endpoint", id); return; }
+    if (typeof value !== "number" || !isFinite(value)) { log("BAD value", id, value); return; }
+    params[id] = value;
+    for (const l of allListeners) l({ endpointID: id, value });
+  },
+  sendParameterGestureStart(id) { log("gesture start", id); },
+  sendParameterGestureEnd(id) { log("gesture end  ", id, "=", params[id]?.toFixed?.(4)); },
+  requestParameterValue(id) { setTimeout(() => { for (const l of allListeners) l({ endpointID: id, value: params[id] }); }, 0); },
+  addAllParameterListener(l) { allListeners.add(l); },
+  removeAllParameterListener(l) { allListeners.delete(l); log("removed param listener"); },
+  // stored state: nothing answers here, as in cmaj play (no window-size setting, no host menu)
+  requestStoredStateValue(key) { log("stored-state request", key); },
+  addStoredStateValueListener() {},
+  removeStoredStateValueListener() { log("removed stored-state listener"); },
+  addEndpointListener(id, l) { if (!endpointListeners.has(id)) endpointListeners.set(id, new Set()); endpointListeners.get(id).add(l); },
+  removeEndpointListener(id, l) { endpointListeners.get(id)?.delete(l); log("removed endpoint listener", id); },
+};
+window.__mock = { params, connection, seed };
+
+// ~1600 lattice steps per 30 Hz frame ≈ 48 kHz at Speed 1
+let last = performance.now();
+setInterval(() => {
+  const now = performance.now();
+  inject(now);
+  const steps = Math.min(3200, Math.round(1600 * params.speed));
+  const sub = Math.max(1, Math.ceil(params.speed)), dt = params.speed / sub;
+  for (let s = 0; s < steps / sub; s++) for (let k = 0; k < sub; k++) step(dt);
+  const dist = params.tapDistance * 12;
+  const frame = { v: Array.from(v), injectL: 32, injectR: 96, tapL: 32 + dist, tapR: 96 - dist, level: 0.1 + 0.05 * Math.sin(now / 700) };
+  for (const l of endpointListeners.get("lattice") ?? []) l(frame);
+  last = now;
+}, 1000 / 30);
+
+const view = await createPatchView(connection);
+document.getElementById("frame").appendChild(view);
+log("view mounted");
+</script>
+</body>
+</html>

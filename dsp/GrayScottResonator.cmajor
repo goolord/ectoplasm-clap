@@ -1,0 +1,544 @@
+/*
+    GrayScottResonator
+    ==================
+
+    A morphing resonator built on a 1D Gray-Scott reaction-diffusion ring
+    lattice that is integrated at audio rate.
+
+        dU/dt = Du ∇²U - U V² + F (1 - U)
+        dV/dt = Dv ∇²V + U V² - (F + K) V
+
+    Signal flow (per sample, per channel):
+
+        in ──drive──tanh──┐
+                          ├──► B-spline splat into V at the injector
+        cross-feedback ───┘
+                                   │
+                [ 128-node ring, explicit Euler, 1-8 sub-steps, soft-clamped ]
+                                   │
+        pickup (cubic B-spline) ◄──┘
+          └─► DC block ─► 2-pole LP ─► fixed gain ─┬─► tanh ─► feedback
+                                                   └─► level match ─► tanh ─► dry/wet ─► gain ─► out
+
+    How it resonates: between the Hopf and saddle-node curves of the F×K
+    plane the homogeneous state (U*, V*) is a stable focus, so the lattice
+    rings around it like a tuned resonator (Q → ∞ at the Hopf curve; past it
+    the ring self-oscillates). The lattice sits exactly on that state when it
+    exists, and on the trivial state (U=1, V=0) when it doesn't, so with no
+    input there is nothing to hear: every sound starts from the input. Left of
+    the Hopf curve the state is unstable and the ring oscillates by itself
+    once disturbed; Resonance ≥ ~1 does the same anywhere near the focus.
+
+    Level: how loudly the lattice answers varies by ~40 dB across the F×K
+    plane, so the output is level-matched to the input, outside the feedback
+    loop. The match compares input and wet loudness over about half a second, only
+    ever boosts, and freezes while there is no input, so it can't lift noise,
+    stretch tails, or pump. (An AGC inside the loop did pump: it raised the loop
+    gain whenever things went quiet, turning the ring into a relaxation
+    oscillator that clicked on its own clock.) The feedback path uses the
+    fixed-gain signal, so Resonance means the same thing everywhere.
+
+    Time is normalised to a 48 kHz reference, so a given Speed gives the same
+    pitch at any host sample rate.
+
+    Stability (see STABILITY.md for the derivation):
+      * The discrete Laplacian is L = ½(x[i-1] + x[i+1]) - x[i], whose eigenvalues
+        lie in [-2, 0]. With Du ≤ 0.5 and dt ≤ 1 we have Du·dt·2 ≤ 1, so the
+        diffusion part of explicit Euler is monotone (no sign-flipping
+        checkerboard modes) — not just stable.
+      * F ∈ [0.010, 0.090], K ∈ [0.045, 0.070] keep every reaction-Jacobian
+        eigenvalue at the trivial state well inside the Euler stability disc.
+      * Each node is soft-clamped into [0, 1.25] after every step; NaN and -Inf
+        map to 0 and +Inf to 1.25, so the lattice can never hold a non-finite
+        value. An output watchdog re-seeds the lattice as a last resort.
+*/
+
+namespace GrayScott
+{
+    let numNodes = 128;
+    let maxSubSteps = 8;          // Speed 4 at 24 kHz still gets dt ≤ 1
+    let referenceRate = 48000.0f; // the lattice's time base
+
+    /// Peak V added per sample at an injector for a full-scale excitation.
+    /// ~0.02 keeps the lattice in its linear (resonant-filter) regime; Drive
+    /// pushes it past that into pulse-triggering, pattern-breaking territory.
+    let injectionGain = 0.04f;
+
+    /// Furthest a pickup sits from its injector, in nodes. At audio rates a
+    /// diffusive lattice only carries a signal ~√(2D/ω) ≈ 3-4 nodes before it is
+    /// attenuated by e, so the useful range is short; beyond it you mostly hear
+    /// the lattice's own slow dynamics.
+    let maxPickupDistance = 12.0f;
+
+    /// Fixed gain from V fluctuation to the feedback path and the level match.
+    /// At the default settings the lattice already answers at about the input's
+    /// level, so this is close to unity.
+    let wetGain = 1.5f;
+
+    /// Scales Resonance so that ~1 is where the default focus starts to
+    /// sustain itself.
+    let feedbackGain = 2.0f;
+
+    /// Most the level match will boost the wet signal (+30 dB).
+    let maxLevelMatch = 31.6f;
+
+    /// While the input is quieter than this (≈ −60 dBFS) the lattice is never
+    /// re-seeded, so nothing happens without input.
+    let inputPresentThreshold = 0.001f;
+
+    /// Snapshot of the lattice sent to the GUI, ~30 times a second.
+    struct LatticeFrame
+    {
+        float[numNodes] v;
+        float injectL, injectR;   // node positions (fractional)
+        float tapL, tapR;
+        float level;              // smoothed |wet| level, 0..1
+    }
+
+    //==============================================================================
+    processor Resonator  [[ main ]]
+    {
+        input  stream float<2> in;
+        output stream float<2> out;
+
+        input event
+        {
+            float feed            [[ name: "Feed (F)",          min: 0.010, max: 0.090, init: 0.0420, step: 0.0001 ]];
+            float kill            [[ name: "Kill (K)",          min: 0.045, max: 0.070, init: 0.0585, step: 0.0001 ]];
+            float diffusionU      [[ name: "Diffusion U",       min: 0.05,  max: 0.50,  init: 0.40 ]];
+            float diffusionRatio  [[ name: "Diffusion Ratio",   min: 0.10,  max: 1.00,  init: 0.60 ]];
+            float speed           [[ name: "Speed",             min: 0.05,  max: 4.00,  init: 1.00 ]];
+            float drive           [[ name: "Drive",             min: 0.0,   max: 24.0,  init: 6.0,  unit: "dB" ]];
+            float tapDistance     [[ name: "Pickup Distance",   min: 0.0,   max: 1.0,   init: 0.3 ]];
+            float feedback        [[ name: "Resonance",         min: 0.0,   max: 1.5,   init: 0.5 ]];
+            float mix             [[ name: "Mix",               min: 0.0,   max: 1.0,   init: 1.0 ]];
+            float outputGain      [[ name: "Output",            min: -36.0, max: 12.0,  init: -6.0, unit: "dB" ]];
+        }
+
+        /// Re-seeds the lattice for the current F/K (not a host parameter).
+        input event void reseed;
+
+        /// Lattice snapshots for the visualiser.
+        output event LatticeFrame lattice;
+
+        //==============================================================================
+        event feed           (float x)  { feedT     = clamp (x, 0.010f, 0.090f); }
+        event kill           (float x)  { killT     = clamp (x, 0.045f, 0.070f); }
+        event diffusionU     (float x)  { duT       = clamp (x, 0.05f, 0.50f); }
+        event diffusionRatio (float x)  { ratioT    = clamp (x, 0.10f, 1.00f); }
+        event speed          (float x)  { speedT    = clamp (x, 0.05f, 4.00f); }
+        event drive          (float x)  { driveT    = dbToGain (clamp (x, 0.0f, 24.0f)); }
+        event tapDistance    (float x)  { distT     = clamp (x, 0.0f, 1.0f); }
+        event feedback       (float x)  { fbT       = clamp (x, 0.0f, 1.5f); }
+        event mix            (float x)  { mixT      = clamp (x, 0.0f, 1.0f); }
+        event outputGain     (float x)  { gainT     = dbToGain (clamp (x, -36.0f, 12.0f)); }
+        event reseed()                  { seedLattice(); }
+
+        //==============================================================================
+        // Lattice state
+        float[numNodes] u, v;
+
+        // Parameter targets (set by events) and their smoothed per-sample values
+        float feedT = 0.042f, killT = 0.0585f, duT = 0.40f, ratioT = 0.6f, speedT = 1.0f,
+              driveT = 2.0f, distT = 0.3f, fbT = 0.5f, mixT = 1.0f, gainT = 0.5f;
+
+        float feedS = 0.042f, killS = 0.0585f, duS = 0.40f, ratioS = 0.6f, speedS = 1.0f,
+              driveS = 2.0f, distS = 0.3f, fbS = 0.5f, mixS = 1.0f, gainS = 0.5f;
+
+        float smoothCoeff;
+        float rateScale;             // referenceRate / sample rate
+
+        // Output conditioning
+        float<2> dcX1, dcY1, lpZ1, lpZ2, lastWet;
+        float dcCoeff, lpB0, lpB1, lpB2, lpA1, lpA2;
+        float levelFollower;
+
+        // Level match (outside the feedback loop)
+        float inputPower, wetPower, levelMatch = 1.0f;
+        float powerCoeff, matchCoeff;
+
+        // Revival: when the field has collapsed to the trivial (silent) state in
+        // a region where a homogeneous resonant state exists, and there is
+        // input to resonate, the ring is re-seeded and the wet path fades back in.
+        float latticeMass;           // Σ V over the ring after the last step
+        float inputEnvelope, inputRelease;
+        int deadSamples;
+        int reviveAfterSamples;
+        float wetFade = 1.0f;
+        float wetFadeStep;
+
+        int framesUntilSnapshot;
+        int snapshotInterval;
+
+        //==============================================================================
+        void init()
+        {
+            let fs = float (processor.frequency);
+            rateScale = referenceRate / fs;
+
+            // ~25 ms one-pole parameter glide: kills zipper noise on F/K/tap moves
+            smoothCoeff = 1.0f - exp (-1.0f / (0.025f * fs));
+
+            // 8 Hz DC blocker — the V field sits on a large, slowly moving mean
+            dcCoeff = 1.0f - (2.0f * float (pi) * 8.0f / fs);
+
+            // 2nd-order Butterworth low-pass at min(16 kHz, 0.42·fs).
+            // The lattice's Nyquist-rate (checkerboard) content and the
+            // harmonics of the U·V² nonlinearity are removed before output.
+            let fc = min (16000.0f, 0.42f * fs);
+            let k = tan (float (pi) * fc / fs);
+            let q = 0.70710678f;
+            let norm = 1.0f / (1.0f + k / q + k * k);
+            lpB0 = k * k * norm;
+            lpB1 = 2.0f * lpB0;
+            lpB2 = lpB0;
+            lpA1 = 2.0f * (k * k - 1.0f) * norm;
+            lpA2 = (1.0f - k / q + k * k) * norm;
+
+            reviveAfterSamples = int (0.3f * fs);
+            inputRelease = 1.0f - exp (-1.0f / (0.2f * fs));
+            powerCoeff = 1.0f - exp (-1.0f / (0.5f * fs));
+            matchCoeff = 1.0f - exp (-1.0f / (0.25f * fs));
+            wetFadeStep = 1.0f / (0.06f * fs);
+
+            snapshotInterval = max (1, int (fs / 30.0f));
+            framesUntilSnapshot = snapshotInterval;
+
+            seedLattice();
+        }
+
+        //==============================================================================
+        void main()
+        {
+            loop
+            {
+                smoothParameters();
+
+                // Lattice time per sample is split into ⌈t⌉ Euler sub-steps with
+                // dt ≤ 1, so the per-step stability bound (Du·dt ≤ 0.5) holds at
+                // every speed and sample rate. If even maxSubSteps can't keep up
+                // (sample rates below 24 kHz) the lattice runs slow rather than
+                // breaking the bound.
+                let latticeTime = speedS * rateScale;
+                let steps = clamp (int (ceil (latticeTime)), 1, maxSubSteps);
+                let dt = min (1.0f, latticeTime / float (steps));
+                let du = duS;
+                let dv = duS * ratioS;
+
+                // Ring geometry: inputs enter at ¼ and ¾ of the ring, pickups are
+                // mirrored away from them (L clockwise, R anticlockwise).
+                let quarter = float (numNodes) * 0.25f;
+                let injL = quarter;
+                let injR = 3.0f * quarter;
+                let dist = distS * maxPickupDistance;
+                let tapL = injL + dist;
+                let tapR = injR - dist;
+
+                // Excitation: driven, soft-saturated input plus cross-coupled feedback
+                // from the previous output (L pickup feeds the R injector and vice
+                // versa, so energy circulates around the ring).
+                let x = in;
+                let excL = tanh (driveS * x[0]) + feedbackGain * fbS * lastWet[1];
+                let excR = tanh (driveS * x[1]) + feedbackGain * fbS * lastWet[0];
+
+                // The excitation is added straight into V, once per sample.
+                splat (injL, injectionGain * excL);
+                splat (injR, injectionGain * excR);
+
+                for (int s = 0; s < steps; ++s)
+                    latticeMass = integrate (dt, feedS, killS, du, dv);
+
+                trackInput (x);
+                checkForCollapse();
+
+                // Spatial read-out through a cubic B-spline (low-pass) kernel
+                var wet = float<2> (readTap (tapL), readTap (tapR));
+
+                let raw = lowPass (dcBlock (wet)) * wetGain;
+
+                if (! isFiniteVector (raw))
+                {
+                    seedLattice();
+                    wet = float<2>();
+                }
+                else
+                {
+                    let fade = wetFade;
+                    lastWet = tanh (raw) * fade;
+                    wet = tanh (raw * matchLevel (x, raw)) * fade;
+                }
+
+                wetFade = min (1.0f, wetFade + wetFadeStep);
+
+                let level = 0.5f * (abs (wet[0]) + abs (wet[1]));
+                levelFollower += (level - levelFollower) * (level > levelFollower ? 0.01f : 0.0005f);
+
+                out <- (x * (1.0f - mixS) + wet * mixS) * gainS;
+
+                if (--framesUntilSnapshot <= 0)
+                {
+                    framesUntilSnapshot = snapshotInterval;
+                    sendSnapshot (injL, injR, tapL, tapR);
+                }
+
+                advance();
+            }
+        }
+
+        //==============================================================================
+        /// One explicit-Euler step of the reaction-diffusion system, in place.
+        /// The left neighbour's pre-step value is carried in a register and the
+        /// first node's original value is saved for the ring wrap-around, so only
+        /// a single pair of arrays is needed. The interior runs without index
+        /// wrapping; the last node is done separately.
+        float integrate (float dt, float F, float K, float du, float dv)
+        {
+            var mass = 0.0f;
+            let u0 = u[0];
+            let v0 = v[0];
+            var uLeft = u[numNodes - 1];
+            var vLeft = v[numNodes - 1];
+            let dtF = dt * F;
+            let decayU = 1.0f - dtF;
+            let decayV = 1.0f - dt * (F + K);
+            let dtDu = dt * du;
+            let dtDv = dt * dv;
+
+            for (int i = 0; i < numNodes - 1; ++i)
+            {
+                let uc = u.at (i);
+                let vc = v.at (i);
+                let uRight = u.at (i + 1);
+                let vRight = v.at (i + 1);
+                let reaction = dt * uc * vc * vc;
+
+                let un = decayU * uc + dtF + dtDu * (0.5f * (uLeft + uRight) - uc) - reaction;
+                let vn = decayV * vc + dtDv * (0.5f * (vLeft + vRight) - vc) + reaction;
+
+                uLeft = uc;
+                vLeft = vc;
+                u.at (i) = softClamp (un);
+                v.at (i) = softClamp (vn);
+                mass += v.at (i);
+            }
+
+            {
+                let uc = u[numNodes - 1];
+                let vc = v[numNodes - 1];
+                let reaction = dt * uc * vc * vc;
+
+                let un = decayU * uc + dtF + dtDu * (0.5f * (uLeft + u0) - uc) - reaction;
+                let vn = decayV * vc + dtDv * (0.5f * (vLeft + v0) - vc) + reaction;
+
+                u[numNodes - 1] = softClamp (un);
+                v[numNodes - 1] = softClamp (vn);
+                mass += v[numNodes - 1];
+            }
+
+            return mass;
+        }
+
+        /// Keeps a concentration physical. Identity on [1e-12, 0.9], then a C¹
+        /// tanh knee asymptotic to 1.25. Everything else — negatives
+        /// (concentrations can't be negative), denormal-range values and NaN,
+        /// which fails both comparisons — becomes 0.
+        float softClamp (float x)
+        {
+            let knee = 0.9f;
+            let headroom = 0.35f;
+
+            if (x > knee)
+                return knee + headroom * tanh ((x - knee) / headroom);
+
+            if (x >= 1.0e-12f)
+                return x;
+
+            return 0.0f;
+        }
+
+        //==============================================================================
+        /// Uniform cubic B-spline basis. Sums to 1, C² continuous and strictly
+        /// positive, so moving a pickup/injector is click-free and the kernel
+        /// acts as a spatial anti-aliasing low-pass (it attenuates the
+        /// lattice's Nyquist mode by a factor of 3).
+        float<4> bsplineWeights (float t)
+        {
+            let t2 = t * t;
+            let t3 = t2 * t;
+            let it = 1.0f - t;
+
+            return float<4> ((it * it * it) / 6.0f,
+                             (3.0f * t3 - 6.0f * t2 + 4.0f) / 6.0f,
+                             (-3.0f * t3 + 3.0f * t2 + 3.0f * t + 1.0f) / 6.0f,
+                             t3 / 6.0f);
+        }
+
+        float readTap (float position)
+        {
+            let p = wrapPosition (position);
+            let base = int (floor (p));
+            let w = bsplineWeights (p - float (base));
+
+            return w[0] * v.at (base - 1)
+                 + w[1] * v.at (base)
+                 + w[2] * v.at (base + 1)
+                 + w[3] * v.at (base + 2);
+        }
+
+        /// Adds a bipolar amount of V around a position. The clamp keeps the
+        /// concentration physical when the input pulls it below zero.
+        void splat (float position, float amount)
+        {
+            let p = wrapPosition (position);
+            let base = int (floor (p));
+            let w = bsplineWeights (p - float (base));
+
+            v.at (base - 1) = softClamp (v.at (base - 1) + w[0] * amount);
+            v.at (base)     = softClamp (v.at (base)     + w[1] * amount);
+            v.at (base + 1) = softClamp (v.at (base + 1) + w[2] * amount);
+            v.at (base + 2) = softClamp (v.at (base + 2) + w[3] * amount);
+        }
+
+        float wrapPosition (float p)
+        {
+            let n = float (numNodes);
+            return p - n * floor (p / n);
+        }
+
+        //==============================================================================
+        void smoothParameters()
+        {
+            let c = smoothCoeff;
+            feedS  += (feedT  - feedS)  * c;
+            killS  += (killT  - killS)  * c;
+            duS    += (duT    - duS)    * c;
+            ratioS += (ratioT - ratioS) * c;
+            speedS += (speedT - speedS) * c;
+            driveS += (driveT - driveS) * c;
+            distS  += (distT  - distS)  * c;
+            fbS    += (fbT    - fbS)    * c;
+            mixS   += (mixT   - mixS)   * c;
+            gainS  += (gainT  - gainS)  * c;
+        }
+
+        float<2> dcBlock (float<2> x)
+        {
+            let y = x - dcX1 + dcCoeff * dcY1;
+            dcX1 = x;
+            dcY1 = y;
+            return y;
+        }
+
+        float<2> lowPass (float<2> x)
+        {
+            // Transposed direct form II
+            let y = lpB0 * x + lpZ1;
+            lpZ1 = lpB1 * x - lpA1 * y + lpZ2;
+            lpZ2 = lpB2 * x - lpA2 * y;
+            return y;
+        }
+
+        /// Boost that brings the wet signal up to the input's loudness. Only moves
+        /// while there is input; never cuts.
+        float matchLevel (float<2> x, float<2> raw)
+        {
+            if (inputEnvelope >= inputPresentThreshold)
+            {
+                inputPower += (0.5f * (x[0] * x[0] + x[1] * x[1]) - inputPower) * powerCoeff;
+                wetPower   += (0.5f * (raw[0] * raw[0] + raw[1] * raw[1]) - wetPower) * powerCoeff;
+                let target = clamp (sqrt (inputPower / max (wetPower, 1.0e-12f)), 1.0f, maxLevelMatch);
+                levelMatch += (target - levelMatch) * matchCoeff;
+            }
+
+            return levelMatch;
+        }
+
+        bool isFiniteVector (float<2> x)
+        {
+            // NaN fails every comparison, ±Inf fails the magnitude test
+            return abs (x[0]) < 1.0e6f && abs (x[1]) < 1.0e6f;
+        }
+
+        //==============================================================================
+        /// The upper-branch homogeneous steady state (U*, V*) of the reaction, or
+        /// (1, 0) if it doesn't exist. From U V² = F(1-U) and U V = F + K:
+        ///     (F+K) V² - F V + F(F+K) = 0
+        /// which has real roots only below the saddle-node curve K = √F/2 - F.
+        /// Between the Hopf curve (V*² = K) and the saddle-node curve this state
+        /// is a stable focus: the lattice rings like a tuned resonator around it.
+        float<2> homogeneousState (float F, float K)
+        {
+            let FK = F + K;
+            let disc = F * F - 4.0f * F * FK * FK;
+
+            if (disc <= 0.0f)
+                return float<2> (1.0f, 0.0f);
+
+            let vStar = (F + sqrt (disc)) / (2.0f * FK);
+            return float<2> (FK / vStar, vStar);
+        }
+
+        /// Puts the ring exactly on the steady state for the current F/K: the
+        /// homogeneous resonant state where it exists, otherwise the trivial
+        /// state. Both are equilibria, so the ring stays silent until the input
+        /// disturbs it. The output filters are primed with the new pickup value
+        /// so the jump in V doesn't thump through the DC blocker.
+        void seedLattice()
+        {
+            let state = homogeneousState (feedT, killT);
+
+            for (wrap<numNodes> i)
+            {
+                u[i] = state[0];
+                v[i] = state[1];
+            }
+
+            dcX1 = float<2> (state[1]);
+            dcY1 = float<2>();
+            lpZ1 = float<2>();
+            lpZ2 = float<2>();
+            lastWet = float<2>();
+            deadSamples = 0;
+            wetFade = 0.0f;
+        }
+
+        void trackInput (float<2> x)
+        {
+            let peak = max (abs (x[0]), abs (x[1]));
+            inputEnvelope = peak > inputEnvelope ? peak : inputEnvelope + (peak - inputEnvelope) * inputRelease;
+        }
+
+        /// Re-seeds a ring that has collapsed to the silent trivial state, but only
+        /// while there is input to resonate and only where a resonant state exists.
+        void checkForCollapse()
+        {
+            if (latticeMass > 1.0e-3f || inputEnvelope < inputPresentThreshold)
+            {
+                deadSamples = 0;
+                return;
+            }
+
+            if (++deadSamples > reviveAfterSamples)
+            {
+                if (homogeneousState (feedS, killS)[1] > 0.0f)
+                    seedLattice();
+                else
+                    deadSamples = 0;
+            }
+        }
+
+        void sendSnapshot (float injL, float injR, float tapL, float tapR)
+        {
+            LatticeFrame frame;
+            frame.v = v;
+            frame.injectL = injL;
+            frame.injectR = injR;
+            frame.tapL = wrapPosition (tapL);
+            frame.tapR = wrapPosition (tapR);
+            frame.level = levelFollower;
+            lattice <- frame;
+        }
+
+        float dbToGain (float db)   { return pow (10.0f, db * 0.05f); }
+    }
+}

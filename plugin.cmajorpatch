@@ -1,0 +1,25 @@
+{
+    "CmajorVersion":    1,
+    "ID":               "dev.gsr.grayscottresonator",
+    "version":          "1.0.0",
+    "name":             "Gray-Scott Resonator",
+    "description":      "A self-oscillating reaction-diffusion ring resonator",
+    "category":         "effect",
+    "manufacturer":     "GSR",
+    "isInstrument":     false,
+
+    "plugin":
+    {
+        "manufacturerCode":  "Gsrd",
+        "pluginCode":        "Gsr1"
+    },
+
+    "source":           "dsp/GrayScottResonator.cmajor",
+
+    "view": {
+        "src":          "gui/dist/index.js",
+        "width":        880,
+        "height":       560,
+        "resizable":    true
+    }
+}

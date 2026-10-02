@@ -1,0 +1,19 @@
+{
+  "name": "gray-scott-resonator-gui",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ReScript GUI for the Gray-Scott Resonator Cmajor patch",
+  "type": "module",
+  "scripts": {
+    "res:build": "rescript build",
+    "res:clean": "rescript clean",
+    "bundle": "esbuild gui/src/GrayScottGui.res.mjs --bundle --format=esm --target=es2020 --minify --legal-comments=none --outfile=gui/dist/index.js",
+    "build": "npm run res:build && npm run bundle",
+    "dev": "rescript watch",
+    "preview": "node tools/serve.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "rescript": "^12.3.1"
+  }
+}
