@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>GSR GUI harness</title>
 <style>
-  html, body { margin: 0; background: #0b0d10; }
+  html, body { margin: 0; background: #0b0d0b; }
   #frame { width: 880px; height: 560px; margin: 16px; outline: 1px dashed #333; }
-  #log { margin: 0 16px; font: 11px monospace; color: #7d8794; white-space: pre; height: 120px; overflow: auto; }
+  #log { margin: 0 16px; font: 11px monospace; color: #7f8c7f; white-space: pre; height: 120px; overflow: auto; }
 </style>
 </head>
 <body>
@@ -43,10 +43,15 @@ function step(dt) {
     uL = uc; vL = vc; u[i] = soft(un); v[i] = soft(vn);
   }
 }
-// Simulated input: occasional noise bursts into the injectors
-function inject(t) {
-  const burst = (Math.floor(t / 1500) % 2 === 0) ? 0.02 : 0;
-  for (const c of [32, 96]) for (let j = -1; j <= 2; j++) v[(c + j + N) % N] = soft(v[(c + j + N) % N] + burst * (2 * rnd() - 1));
+// Simulated input: a 0.4 s noise burst every 1.5 s, injected every lattice step the way the
+// processor does it (0.003 per sample at Drive 0 dB, spread over four nodes)
+let bursting = false;
+function inject() {
+  if (!bursting) return;
+  for (const c of [32, 96]) for (let j = -1; j <= 2; j++) {
+    const k = (c + j + N) % N;
+    v[k] = soft(v[k] + 0.0012 * Math.pow(10, params.drive / 20) * (2 * rnd() - 1));
+  }
 }
 seed();
 
@@ -77,10 +82,10 @@ window.__mock = { params, connection, seed };
 let last = performance.now();
 setInterval(() => {
   const now = performance.now();
-  inject(now);
+  bursting = (now % 1500) < 400;
   const steps = Math.min(3200, Math.round(1600 * params.speed));
   const sub = Math.max(1, Math.ceil(params.speed)), dt = params.speed / sub;
-  for (let s = 0; s < steps / sub; s++) for (let k = 0; k < sub; k++) step(dt);
+  for (let s = 0; s < steps / sub; s++) { inject(); for (let k = 0; k < sub; k++) step(dt); }
   const dist = params.tapDistance * 12;
   const frame = { v: Array.from(v), injectL: 32, injectR: 96, tapL: 32 + dist, tapR: 96 - dist, level: 0.1 + 0.05 * Math.sin(now / 700) };
   for (const l of endpointListeners.get("lattice") ?? []) l(frame);

@@ -1,7 +1,8 @@
 // Top-level view: two pages on one stage, wired to the patch through the typed Bridge.
 //
-//  * Play (the default): what you see is what you hear. The ring itself, live; the resonance it
-//    will put on a sound, as a frequency response; and six knobs that say what they do in the
+//  * Play (the default): what you see is what you hear. The ring itself, live, read as a
+//    cellular automaton (a petri dish and a spacetime grid of cells); the resonance it will
+//    put on a sound, as a frequency response; and six knobs that say what they do in the
 //    units you hear — Pitch in Hz and notes, Ring as a decay time, Color as the regime (see
 //    Macro.res for how the macros map onto the parameters).
 //  * Lab: the F×K phase plane and every parameter on a slider.
@@ -131,6 +132,8 @@ let stylesheet = `
 .gsr .page { display: none; min-height: 0; }
 .gsr .page.on { display: grid; }
 .gsr .play { grid-template-rows: auto auto 1fr; row-gap: 10px; }
+.gsr .play-top { display: grid; grid-template-columns: 262px 1fr; column-gap: 10px; }
+.gsr .dish { display: block; border-radius: 6px; background: var(--glass); }
 .gsr .lab { grid-template-rows: 1fr auto; row-gap: 10px; }
 
 /* the lattice view (both pages) */
@@ -212,6 +215,7 @@ type knobs = {
 
 type t = {
   bridge: Bridge.t,
+  dish: PetriDish.t,
   phase: PhasePlot.t,
   labLattice: LatticeView.t,
   playLattice: LatticeView.t,
@@ -229,6 +233,7 @@ let render = app => {
   app.frameHandle = None
   switch app.page {
   | Play =>
+    PetriDish.render(app.dish)
     LatticeView.render(app.playLattice)
     ResponsePlot.render(app.response)
   | Lab =>
@@ -350,17 +355,20 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
       Bridge.endGesture(bridge, Kill)
     },
   )
-  let lattice = (~width, ~kymoHeight, ~profileHeight) =>
+  let automaton = CellAutomaton.make()
+  let dish = PetriDish.make(~size=262, ~ca=automaton)
+  let lattice = (~width, ~kymoHeight, ~profileHeight, ~cells=?) =>
     LatticeView.make(
       ~width,
       ~kymoHeight,
       ~profileHeight,
+      ~cells?,
       ~onPickupDistance=d => onPickupMove.contents(d),
       ~onGestureStart=() => Bridge.beginGesture(bridge, TapDistance),
       ~onGestureEnd=() => Bridge.endGesture(bridge, TapDistance),
     )
   let labLattice = lattice(~width=468, ~kymoHeight=222, ~profileHeight=92)
-  let playLattice = lattice(~width=848, ~kymoHeight=196, ~profileHeight=56)
+  let playLattice = lattice(~width=576, ~kymoHeight=164, ~profileHeight=92, ~cells=automaton)
   let response = ResponsePlot.make(~width=848, ~height=92)
 
   //==============================================================================
@@ -412,6 +420,7 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
 
   let app = {
     bridge,
+    dish,
     phase,
     labLattice,
     playLattice,
@@ -424,6 +433,7 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
     cleanups: [],
   }
   phase.invalidate = () => invalidate(app)
+  dish.invalidate = () => invalidate(app)
   labLattice.invalidate = () => invalidate(app)
   playLattice.invalidate = () => invalidate(app)
   response.invalidate = () => invalidate(app)
@@ -461,6 +471,13 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
     knobsRef.contents->Option.forEach(knobs => {
       let focus = Macro.focus(~f, ~k, ~speed, ~resonance)
       let approximate = Macro.pitchIsApproximate(~ratio=valueOf(DiffusionRatio), ~drive=valueOf(Drive))
+      PetriDish.setCaption(
+        dish,
+        switch focus {
+        | Some({hz}) => (approximate ? "≈ " : "") ++ Macro.formatHz(hz)
+        | None => ""
+        },
+      )
       switch focus {
       | Some({hz}) =>
         knobs.pitch->Knob.set(
@@ -686,7 +703,10 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
   )
 
   let playPage = div(~className="page play")
-  playPage->appendChild(playLattice.element)
+  let playTop = div(~className="play-top")
+  playTop->appendChild(dish.element)
+  playTop->appendChild(playLattice.element)
+  playPage->appendChild(playTop)
   playPage->appendChild(response.element)
   playPage->appendChild(knobRow)
 
@@ -732,6 +752,7 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
     // what was hidden may be stale
     playLattice.dirty = true
     labLattice.dirty = true
+    dish.dirty = true
     response.dirty = true
     phase.dirty = true
     invalidate(app)
@@ -791,6 +812,8 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
     refreshDerived()
   })
   Bridge.onLatticeFrame(bridge, frame => {
+    CellAutomaton.push(automaton, frame.v)
+    PetriDish.setFrame(dish, frame)
     LatticeView.pushFrame(labLattice, frame)
     LatticeView.pushFrame(playLattice, frame)
     app.level = frame.level

@@ -6,6 +6,9 @@
 // stay visible; the profile underneath shows absolute concentration.
 // Bottom: the current V profile with the two injectors and the two pickups.
 // Pickups can be dragged to set Pickup distance.
+//
+// Given a CellAutomaton, the history is drawn as its cells instead: square blocks, newest
+// generation at the top, born cells glowing and dying ones fading (the Play page).
 
 open Web
 module Bindings = CmajorBindings
@@ -16,8 +19,17 @@ let maxPickupDistance = 12.0 // nodes — matches the processor constant
 // ~7 s of history at 30 snapshots/s, whatever size the view is drawn at
 let historyRows = 210
 
+// The cell style: a pixel map into the automaton's history, and a 1× image to paint it into.
+type cells = {
+  ca: CellAutomaton.t,
+  map: CellAutomaton.ints32,
+  scratch: element,
+  image: imageData,
+}
+
 type t = {
   element: element,
+  cells: option<cells>,
   width: int,
   kymoHeight: int,
   profileHeight: int,
@@ -58,7 +70,44 @@ let adaptRange = (view, frame: Bindings.latticeFrame) => {
   view.rangeHigh = hi > view.rangeHigh ? hi : view.rangeHigh +. (hi -. view.rangeHigh) *. 0.02
 }
 
-let pushFrame = (view, frame: Bindings.latticeFrame) => {
+/// Pixel → (generation, cell) for the history area: square cells across the width, the newest
+/// generation in the top row, a pixel of gap where cells are big enough to show one.
+let buildCellMap = (~width, ~height) => {
+  let map = CellAutomaton.makeInts(width * height)
+  let cellWidth = Int.toFloat(width) /. Int.toFloat(CellAutomaton.numCells)
+  let showGaps = cellWidth >= 3.0
+  for y in 0 to height - 1 {
+    let rowF = (Int.toFloat(y) +. 0.5) /. cellWidth
+    let age = Float.toInt(rowF)
+    for x in 0 to width - 1 {
+      let colF = (Int.toFloat(x) +. 0.5) /. cellWidth
+      let cell = Math.Int.min(CellAutomaton.numCells - 1, Float.toInt(colF))
+      let entry = if age >= CellAutomaton.generations {
+        CellAutomaton.outside
+      } else if showGaps && (colF -. Math.floor(colF) < 1.0 /. cellWidth || rowF -. Math.floor(rowF) < 1.0 /. cellWidth) {
+        CellAutomaton.gap
+      } else {
+        CellAutomaton.index(~age, ~cell)
+      }
+      CellAutomaton.setInt(map, y * width + x, entry)
+    }
+  }
+  map
+}
+
+let rec pushFrame = (view, frame: Bindings.latticeFrame) =>
+  switch view.cells {
+  | Some(_) =>
+    // the automaton is pushed by its owner; this view only needs the latest frame
+    if view.latest->Option.isNone {
+      setStyle(view.emptyNote, "display", "none")
+    }
+    view.latest = Some(frame)
+    markDirty(view)
+  | None => pushSmooth(view, frame)
+  }
+
+and pushSmooth = (view, frame: Bindings.latticeFrame) => {
   adaptRange(view, frame)
   let span = Math.max(minimumSpan, view.rangeHigh -. view.rangeLow)
   let centre = (view.rangeHigh +. view.rangeLow) /. 2.0
@@ -105,6 +154,14 @@ let renderKymograph = view => {
   Ctx.fillStyle(ctx, Palette.well)
   Ctx.fillRect(ctx, 0.0, 0.0, w, h)
 
+  switch view.cells {
+  | Some({ca, map, scratch, image}) =>
+    CellAutomaton.paint(ca, image, map, ~pixels=view.width * view.kymoHeight, ~background=Palette.wellRgb)
+    Ctx.putImageData(getContext2d(scratch), image, 0, 0)
+    Ctx.imageSmoothingEnabled(ctx, false)
+    Ctx.drawImage(ctx, scratch, 0.0, 0.0, w, h)
+  | None =>
+
   // Rows [head, historyRows) are newest→older, then wrap to [0, head).
   let rowScale = h /. Int.toFloat(historyRows)
   let firstSpan = historyRows - view.head
@@ -134,6 +191,7 @@ let renderKymograph = view => {
       w,
       Int.toFloat(view.head) *. rowScale,
     )
+  }
   }
 
   switch view.latest {
@@ -246,6 +304,7 @@ let make = (
   ~width: int,
   ~kymoHeight: int,
   ~profileHeight: int,
+  ~cells: option<CellAutomaton.t>=?,
   ~onPickupDistance: float => unit,
   ~onGestureStart: unit => unit,
   ~onGestureEnd: unit => unit,
@@ -279,7 +338,13 @@ let make = (
   let timeNow = div(~className="time-label time-now")
   setTextContent(timeNow, "now")
   let timeAgo = div(~className="time-label time-ago")
-  setTextContent(timeAgo, "7 s ago")
+  let shownSeconds = switch cells {
+  | Some(_) =>
+    // square cells: as many generations as fit, at 30 a second
+    Int.toFloat(kymoHeight) /. (Int.toFloat(width) /. Int.toFloat(CellAutomaton.numCells)) /. 30.0
+  | None => Int.toFloat(historyRows) /. 30.0
+  }
+  setTextContent(timeAgo, Float.toFixed(shownSeconds, ~digits=shownSeconds < 2.0 ? 1 : 0) ++ " s ago")
   kymoWrap->appendChild(timeNow)
   kymoWrap->appendChild(timeAgo)
 
@@ -288,6 +353,10 @@ let make = (
 
   let view = {
     element,
+    cells: cells->Option.map(ca => {
+      let (scratch, _, image) = CellAutomaton.scratch(~width, ~height=kymoHeight)
+      {ca, map: buildCellMap(~width, ~height=kymoHeight), scratch, image}
+    }),
     width,
     kymoHeight,
     profileHeight,

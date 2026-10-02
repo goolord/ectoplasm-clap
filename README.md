@@ -4,7 +4,7 @@ A stereo resonator effect built on a 1D Gray-Scott reaction-diffusion ring of 12
 
 The GUI is written in ReScript and has two pages:
 
-* **Play** (the default) shows what you'll hear. It has the live ring, the frequency response the ring will put on a sound, and six knobs: Pitch, Ring, Color, Drive, Mix and Output. Each knob reads in the units you hear: Hz and note names, decay time, and the chemical regime.
+* **Play** (the default) shows what you'll hear. It has the live ring drawn as a cellular automaton (a petri dish and a grid of cells), the frequency response the ring will put on a sound, and six knobs: Pitch, Ring, Color, Drive, Mix and Output. Each knob reads in the units you hear: Hz and note names, decay time, and the chemical regime.
 * **Lab** shows the F×K phase plane, with the analytic Hopf and saddle-node curves and a measured overlay, plus every parameter on a slider.
 
 A preset menu in the header has nine factory presets.
@@ -20,7 +20,8 @@ A preset menu in the header has nine factory presets.
 | `gui/src/GrayScottApp.res` | App shell: the two pages, header and preset menu, one parameter mirror, scaling, rendering on demand |
 | `gui/src/Macro.res` | The macros (Color, Ring, Pitch) and the discrete-time focus arithmetic behind the readouts |
 | `gui/src/Presets.res` | Factory presets |
-| `gui/src/Knob.res`, `ResponsePlot.res` | Play page widgets |
+| `gui/src/Knob.res`, `ResponsePlot.res`, `PetriDish.res` | Play page widgets |
+| `gui/src/CellAutomaton.res` | Reads the ring as a 1D cellular automaton, with the history and the pixel-map painter the cell views share |
 | `gui/src/PhasePlot.res`, `Controls.res` | Lab page widgets |
 | `gui/src/LatticeView.res` | Kymograph and V-profile view, with draggable pickups (both pages) |
 | `gui/src/CmajorBindings.res` | Typed `PatchConnection` bindings, the `Param` model, and the glitch-free `Bridge` |
@@ -61,6 +62,13 @@ That builds `dist/Ectoplasm.clap`. The steps are: install npm packages if they'r
 `CONFIG=Debug just` builds a debug plugin, and `CMAJ_PLUGIN_PERF=1` in a host's environment logs per-instance CPU time (see `tools/clap-patch.mjs`). Cmajor names the CMake target after the manifest name with non-alphanumerics removed; the justfile copies it to `dist/` under the display name.
 
 ## The Play page
+
+**The culture.** The ring is a one-dimensional cellular automaton: 128 cells, each updated from its neighbours every step. The Play page draws it that way:
+
+* The **petri dish** lays the ring around a circle, node 0 at twelve o'clock. Each generation (a lattice snapshot, 30 a second) is a ring of cells, newest at the rim and older ones growing inward. Injectors are marked outside the rim and pickups on it, and the middle shows the pitch.
+* The **cell grid** beside it is the same history as a spacetime diagram, newest generation at the top, above the live V profile with its draggable pickups.
+
+A cell is alive while its V stands above the rest of its generation: its deviation from the ring's median, against a slowly adapting range, with hysteresis. Newborn cells glow and dying ones fade. Measuring against the median keeps the ring's uniform swing, which is the resonance you hear, from flooding whole generations. What's left is what happens across the ring. At rest the dish is empty. Input seeds colonies at the injectors that spread and branch, then die back as the disturbance fades. Each view maps its pixels to cells once, so a generation costs one pass over a small 1× image, scaled up with crisp edges.
 
 | Knob | Sets | Shows |
 |---|---|---|

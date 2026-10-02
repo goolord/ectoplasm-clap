@@ -1,6 +1,6 @@
-// Cold steel with an ectoplasm glow: near-neutral gunmetal grounds with a faint blue cast, a
-// green accent, and concentration rendered as a value ramp from blackened steel up to a pale
-// green glow.
+// Ectoplasm: near-black grounds with a faint green cast (no blue), a slime-green accent, and
+// concentration rendered as a ramp from the dark up through moss to a pale green glow. Region
+// colours stay in the warm-neutral to green range: amber, olive, moss, lime.
 // Every colour the GUI uses lives here.
 
 type rgb = (int, int, int)
@@ -21,18 +21,18 @@ let hex = ((r, g, b): rgb) => {
 }
 
 // Grounds and text
-let slideRgb: rgb = (17, 20, 24) // page ground
-let glassRgb: rgb = (25, 30, 36) // panel ground
-let wellRgb: rgb = (11, 13, 16) // kymograph ground
-let ruleRgb: rgb = (43, 51, 60) // hairlines, axes, slider tracks
-let inkRgb: rgb = (221, 228, 234) // primary text
-let inkMutedRgb: rgb = (138, 150, 163) // secondary text
+let slideRgb: rgb = (15, 18, 15) // page ground
+let glassRgb: rgb = (23, 28, 23) // panel ground
+let wellRgb: rgb = (9, 12, 9) // kymograph and dish ground
+let ruleRgb: rgb = (40, 49, 41) // hairlines, axes, slider tracks
+let inkRgb: rgb = (226, 234, 222) // primary text
+let inkMutedRgb: rgb = (140, 154, 140) // secondary text
 
 // Accents
-let accentRgb: rgb = (137, 222, 152) // ectoplasm green: brand mark, knobs, thumbs, V profile line
-let activeRgb: rgb = (230, 238, 244) // the thing under your hand: puck, pickups, Hopf curve
-let oscillationRgb: rgb = (164, 240, 170) // measured self-oscillation
-let fillRgb: rgb = (74, 90, 108) // V profile fill
+let accentRgb: rgb = (142, 230, 140) // ectoplasm green: brand mark, knobs, thumbs, V profile line
+let activeRgb: rgb = (236, 246, 228) // the thing under your hand: puck, pickups, Hopf curve
+let oscillationRgb: rgb = (200, 255, 150) // measured self-oscillation
+let fillRgb: rgb = (46, 72, 50) // V profile fill
 
 let slide = hex(slideRgb)
 let glass = hex(glassRgb)
@@ -46,12 +46,12 @@ let oscillation = hex(oscillationRgb)
 
 let regionColour = (r: GrayScottTheory.region): rgb =>
   switch r {
-  | Chaos => (196, 182, 166) // pewter
-  | Drones => (226, 234, 240) // polished steel
-  | Stripes => (127, 186, 180) // blued-teal
-  | Damped => (98, 114, 132) // slate
-  | Spots => (160, 160, 196) // cold lavender-grey
-  | Solitons => (120, 164, 200) // steel blue
+  | Chaos => (214, 168, 104) // amber
+  | Drones => (142, 230, 140) // ectoplasm green
+  | Stripes => (186, 216, 112) // chartreuse
+  | Damped => (112, 128, 110) // grey-green
+  | Spots => (208, 200, 132) // olive-cream
+  | Solitons => (150, 190, 120) // moss
   | Silent => slideRgb
   }
 
@@ -65,10 +65,10 @@ let labelColour = (r: GrayScottTheory.region): rgb => {
 // Value ramp for V concentration, 0 → 1.
 let rampStops: array<(float, rgb)> = [
   (0.00, wellRgb),
-  (0.30, (38, 47, 58)),
-  (0.55, (76, 95, 115)),
-  (0.78, (128, 170, 158)),
-  (1.00, (214, 246, 222)),
+  (0.30, (30, 44, 31)),
+  (0.55, (56, 96, 60)),
+  (0.78, (112, 194, 112)),
+  (1.00, (222, 255, 206)),
 ]
 
 let lerp = (a, b, t) => Float.toInt(Int.toFloat(a) +. (Int.toFloat(b) -. Int.toFloat(a)) *. t)
@@ -98,3 +98,8 @@ let rampLut: array<int> = {
 
 /// Typical V range in active regimes; values above saturate the profile.
 let vFullScale = 0.45
+
+// Cellular-automaton states (CellAutomaton.res): empty, fading (alive a moment ago), alive, and
+// just born, which glows.
+let cellColours: array<rgb> = [(13, 17, 13), (36, 74, 42), (98, 186, 104), (214, 255, 186)]
+let cellGapRgb: rgb = (7, 9, 7)
