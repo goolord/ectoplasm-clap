@@ -27,13 +27,18 @@
     the Hopf curve the state is unstable and the ring oscillates by itself
     once disturbed; Resonance ≥ ~1 does the same anywhere near the focus.
 
-    Level: how loudly the lattice answers varies by ~40 dB across the F×K
-    plane, so the output is level-matched to the input, outside the feedback
-    loop. The match compares input and wet loudness over about half a second, only
-    ever boosts, and freezes while there is no input, so it can't lift noise,
-    stretch tails, or pump. (An AGC inside the loop did pump: it raised the loop
-    gain whenever things went quiet, turning the ring into a relaxation
-    oscillator that clicked on its own clock.)
+    Level: how loudly the lattice answers varies by ~40 dB across the settings,
+    so the output is level-matched to the input, outside the feedback loop. A
+    linear model of the ring predicts the gain for each setting as soon as it
+    moves (see "The level model" below), and a trim learned from the input over
+    about half a second makes up the model's error (the input's spectrum, and
+    how far loud input pushes the ring out of its linear range). The trim
+    freezes while there is no input, so it can't lift noise, stretch tails, or
+    pump. Before the model, the match had only the learned part: after a change
+    the level took a second or more to come back, and where the ring is quiet
+    it ran into its +30 dB ceiling and stayed low. (An AGC inside the loop did
+    pump: it raised the loop gain whenever things went quiet, turning the ring
+    into a relaxation oscillator that clicked on its own clock.)
 
     Resonance is anti-damping inside the chemistry, not an audio feedback loop:
     each step adds g·A·d/(A + |d|) to V, with d = V − V*. That raises the
@@ -68,6 +73,7 @@ namespace GrayScott
 {
     let numNodes = 128;
     let maxSubSteps = 8;          // Speed 4 at 24 kHz still gets dt ≤ 1
+    let maxStep = 1.25f;          // longest Euler step, in lattice time
     let referenceRate = 48000.0f; // the lattice's time base
 
     /// Peak V added per sample at an injector for a full-scale input at Drive
@@ -93,8 +99,26 @@ namespace GrayScott
 
 
 
-    /// Most the level match will boost the wet signal (+30 dB).
-    let maxLevelMatch = 31.6f;
+    /// Most the level match will boost the wet signal (+50 dB), and cut it (−12 dB).
+    /// At the default settings the ring answers ~35 dB below the input, and up to
+    /// ~45 dB with the pickups far out or a high pitch.
+    let maxLevelMatch = 316.0f;
+    let minLevelMatch = 0.25f;
+
+    /// How far the learned trim may move the predicted level (±18 dB).
+    let maxTrim = 8.0f;
+
+    /// The level model (see the processor's matchLevel): the even spatial modes
+    /// 0, 2, … 64, which are all a mono input excites (the injectors are half the
+    /// ring apart), and the frequencies it averages over, 20 Hz to 20 kHz.
+    let modelModes = 33;
+    let modelPoints = 96;
+
+    /// The model takes Resonance as no more than this. Real input saturates the
+    /// anti-damping (it's soft-limited at resonanceLimit), so the closer to the
+    /// edge, the more the linear gain overstates what you hear; 0.7 fits renders
+    /// of music-level pink noise best, and the trim makes up the rest.
+    let modelResonanceCap = 0.7f;
 
     /// While the input is quieter than this (≈ −60 dBFS) the lattice is never
     /// re-seeded, so nothing happens without input.
@@ -149,8 +173,14 @@ namespace GrayScott
         event reseed()                  { seedLattice(); }
 
         //==============================================================================
-        // Lattice state
-        float[numNodes] u, v;
+        // Lattice state: each node's U and V as offsets from a reference state
+        // (uRef, vRef), the steady state the ring rings around. Near rest the
+        // offsets are tiny, and so is their rounding: kept as concentrations (~0.3)
+        // every step rounded to ~3e-8, which a high-Q focus kept ringing as a steady
+        // tone after the sound had died away. Offsets decay to true silence.
+        float[numNodes] uOff, vOff;
+        float uRef = 1.0f, vRef;
+        float[numNodes] lapU, lapV;  // scratch for integrate
 
         // Parameter targets (set by events) and their smoothed per-sample values
         float feedT = 0.04462f, killT = 0.0585f, duT = 0.40f, ratioT = 1.0f, speedT = 1.0f,
@@ -162,8 +192,8 @@ namespace GrayScott
         float smoothCoeff;
         float rateScale;             // referenceRate / sample rate
 
-        // Resonance: anti-damping g·(V − V*), updated every 64 samples
-        float antiDamping, vStar;
+        // Resonance: anti-damping g·(V − V*), updated every 64 samples (V* is vRef)
+        float antiDamping;
         int framesUntilFocusUpdate;
 
         // Output conditioning
@@ -171,14 +201,26 @@ namespace GrayScott
         float dcCoeff, lpB0, lpB1, lpB2, lpA1, lpA2;
         float levelFollower;
 
-        // Level match (outside the feedback loop)
-        float inputPower, wetPower, levelMatch = 1.0f;
+        // Level match (outside the feedback loop): the level the model predicts,
+        // times a trim learned from the input
+        float inputPower, wetPower, trim = 1.0f;
         float powerCoeff, matchCoeff;
+        float predicted = 1.0f, predictedS = 1.0f;
+
+        // The level model, worked through a mode or a frequency per sample
+        float[modelModes] modeWeight, modeP11, modeTrace, modeDet;
+        float[modelPoints] pointCos, pointSin, pointChain;
+        float[numNodes] ringCos, ringSin;
+        int modelStage;              // < modelModes: a mode; then a frequency; then idle
+        float modelPower;
+        float modelF, modelK, modelDu, modelRatio, modelSpeed, modelFb, modelDist, modelDrive;
+        float modelU, modelV, modelG, modelDt;
+        int modelSteps;
 
         // Revival: when the field has collapsed to the trivial (silent) state in
         // a region where a homogeneous resonant state exists, and there is
         // input to resonate, the ring is re-seeded and the wet path fades back in.
-        float latticeMass;           // Σ V over the ring after the last step
+        float latticeMass;           // Σ V over the ring, every 64 samples
         float inputEnvelope, inputRelease;
         int deadSamples;
         int reviveAfterSamples;
@@ -222,6 +264,7 @@ namespace GrayScott
             snapshotInterval = max (1, int (fs / 30.0f));
             framesUntilSnapshot = snapshotInterval;
 
+            initLevelModel (fs);
             seedLattice();
         }
 
@@ -232,14 +275,10 @@ namespace GrayScott
             {
                 smoothParameters();
 
-                // Lattice time per sample is split into ⌈t⌉ Euler sub-steps with
-                // dt ≤ 1, so the per-step stability bound (Du·dt ≤ 0.5) holds at
-                // every speed and sample rate. If even maxSubSteps can't keep up
-                // (sample rates below 24 kHz) the lattice runs slow rather than
-                // breaking the bound.
+                // Lattice time per sample, in Euler sub-steps (see subSteps)
                 let latticeTime = speedS * rateScale;
-                let steps = clamp (int (ceil (latticeTime)), 1, maxSubSteps);
-                let dt = min (1.0f, latticeTime / float (steps));
+                let steps = subSteps (latticeTime, duS);
+                let dt = stepLength (latticeTime, steps, duS);
                 let du = duS;
                 let dv = duS * ratioS;
 
@@ -256,6 +295,8 @@ namespace GrayScott
                 {
                     framesUntilFocusUpdate = 64;
                     updateAntiDamping (dt);
+                    latticeMass = sum (vOff) + float (numNodes) * vRef;
+                    flushTinyOffsets();
                 }
 
                 // Excitation: the soft-saturated input, scaled by Drive
@@ -268,7 +309,7 @@ namespace GrayScott
                 splat (injR, injectionGain * excR);
 
                 for (int s = 0; s < steps; ++s)
-                    latticeMass = integrate (dt, feedS, killS, du, dv);
+                    integrate (dt, feedS, killS, du, dv);
 
                 trackInput (x);
                 checkForCollapse();
@@ -288,6 +329,8 @@ namespace GrayScott
                     wet = tanh (raw * matchLevel (x, raw)) * wetFade;
                 }
 
+                stepLevelModel();
+
                 wetFade = min (1.0f, wetFade + wetFadeStep);
 
                 let level = 0.5f * (abs (wet[0]) + abs (wet[1]));
@@ -306,70 +349,104 @@ namespace GrayScott
         }
 
         //==============================================================================
-        /// One explicit-Euler step of the reaction-diffusion system, in place.
-        /// The left neighbour's pre-step value is carried in a register and the
-        /// first node's original value is saved for the ring wrap-around, so only
-        /// a single pair of arrays is needed. The interior runs without index
-        /// wrapping; the last node is done separately.
-        float integrate (float dt, float F, float K, float du, float dv)
+        /// One explicit-Euler step of the reaction-diffusion system, in two passes
+        /// over the ring: the Laplacians from the values before the step, then each
+        /// node's update on its own. Both are plain loops the C++ compiler keeps in
+        /// registers, with no branch but the clamp at 0; the knee at the top of
+        /// softClamp only runs when something has reached it (strong Drive), so the
+        /// usual step skips 256 calls that would change nothing.
+        ///
+        /// With u = U* + a and v = V* + b, and U* V*² = F (1 − U*) = (F + K) V* at the
+        /// reference, the reaction in offsets is
+        ///     da/dt = −F a − s,   db/dt = s − (F + K) b,   s = U v² − U* V*²
+        ///                                                    = U* (2V* + b) b + a v²
+        /// which is the same Euler step, just without the reference's rounding.
+        void integrate (float dt, float F, float K, float du, float dv)
         {
-            var mass = 0.0f;
-            let dtG = dt * antiDamping;
+            lapU[0] = 0.5f * (uOff[numNodes - 1] + uOff[1]) - uOff[0];
+            lapV[0] = 0.5f * (vOff[numNodes - 1] + vOff[1]) - vOff[0];
+
+            for (int i = 1; i < numNodes - 1; ++i)
+            {
+                lapU.at (i) = 0.5f * (uOff.at (i - 1) + uOff.at (i + 1)) - uOff.at (i);
+                lapV.at (i) = 0.5f * (vOff.at (i - 1) + vOff.at (i + 1)) - vOff.at (i);
+            }
+
+            lapU[numNodes - 1] = 0.5f * (uOff[numNodes - 2] + uOff[0]) - uOff[numNodes - 1];
+            lapV[numNodes - 1] = 0.5f * (vOff[numNodes - 2] + vOff[0]) - vOff[numNodes - 1];
+
+            // Resonance's anti-damping, g·A·d/(A + |d|) with d = V − V* (= b): linear
+            // for small deviations, so it sharpens the focus's Q, but bounded for
+            // large ones, so a self-oscillating ring settles into a limit cycle of
+            // about ±A instead of swinging out of the focus's basin (Gray-Scott's Hopf
+            // bifurcation is subcritical) and collapsing to the trivial state. The
+            // gradual roll-off matters: a hard clamp keeps pushing at full strength
+            // past ±A, and the ring collapses anyway.
+            let gA = dt * antiDamping * resonanceLimit;
             let limit = resonanceLimit;
-            let u0 = u[0];
-            let v0 = v[0];
-            var uLeft = u[numNodes - 1];
-            var vLeft = v[numNodes - 1];
-            let dtF = dt * F;
-            let decayU = 1.0f - dtF;
+            let U0 = uRef;
+            let V0 = vRef;
+            let dtU0 = dt * U0;
+            let twoV0 = 2.0f * V0;
+            let decayU = 1.0f - dt * F;
             let decayV = 1.0f - dt * (F + K);
+            let lowestU = 1.0e-12f - U0;   // an offset that takes a concentration below 0
+            let lowestV = 1.0e-12f - V0;
             let dtDu = dt * du;
             let dtDv = dt * dv;
+            var highestU = 0.0f;
+            var highestV = 0.0f;
 
-            for (int i = 0; i < numNodes - 1; ++i)
+            for (wrap<numNodes> i)
             {
-                let uc = u.at (i);
-                let vc = v.at (i);
-                let uRight = u.at (i + 1);
-                let vRight = v.at (i + 1);
-                let reaction = dt * uc * vc * vc;
-
-                let un = decayU * uc + dtF + dtDu * (0.5f * (uLeft + uRight) - uc) - reaction;
-                let vn = decayV * vc + dtDv * (0.5f * (vLeft + vRight) - vc) + reaction + dtG * softLimit (vc - vStar, limit);
-
-                uLeft = uc;
-                vLeft = vc;
-                u.at (i) = softClamp (un);
-                v.at (i) = softClamp (vn);
-                mass += v.at (i);
+                let a = uOff[i];
+                let b = vOff[i];
+                let v = V0 + b;
+                let reaction = dtU0 * (twoV0 + b) * b + dt * a * v * v;
+                let an = decayU * a + dtDu * lapU[i] - reaction;
+                let bn = decayV * b + dtDv * lapV[i] + reaction + gA * b / (limit + abs (b));
+                // the bottom of softClamp: a negative concentration (or NaN) becomes 0
+                let ak = an >= lowestU ? an : -U0;
+                let bk = bn >= lowestV ? bn : -V0;
+                uOff[i] = ak;
+                vOff[i] = bk;
+                highestU = max (highestU, ak);
+                highestV = max (highestV, bk);
             }
 
+            if (U0 + highestU > 0.9f || V0 + highestV > 0.9f)
             {
-                let uc = u[numNodes - 1];
-                let vc = v[numNodes - 1];
-                let reaction = dt * uc * vc * vc;
-
-                let un = decayU * uc + dtF + dtDu * (0.5f * (uLeft + u0) - uc) - reaction;
-                let vn = decayV * vc + dtDv * (0.5f * (vLeft + v0) - vc) + reaction + dtG * softLimit (vc - vStar, limit);
-
-                u[numNodes - 1] = softClamp (un);
-                v[numNodes - 1] = softClamp (vn);
-                mass += v[numNodes - 1];
+                for (wrap<numNodes> i)
+                {
+                    uOff[i] = clampOffset (uOff[i], U0);
+                    vOff[i] = clampOffset (vOff[i], V0);
+                }
             }
-
-            return mass;
         }
 
-        /// d, saturating smoothly at ±limit: linear for small deviations, so the
-        /// anti-damping sharpens the focus's Q, but bounded for large ones, so a
-        /// self-oscillating ring settles into a limit cycle of about ±limit
-        /// instead of swinging out of the focus's basin (Gray-Scott's Hopf
-        /// bifurcation is subcritical) and collapsing to the trivial state. The
-        /// gradual roll-off matters: a hard clamp keeps pushing at full strength
-        /// past ±limit, and the ring collapses anyway.
-        float softLimit (float d, float limit)
+        /// A decaying ring's offsets would end in denormals, which are slow on x86
+        /// (and x − c·x rounds back to x down there, so they'd stay). Every 64 samples
+        /// is often enough: an offset takes far longer than that to fall from 1e-20
+        /// to the denormal range.
+        void flushTinyOffsets()
         {
-            return limit * d / (limit + abs (d));
+            for (wrap<numNodes> i)
+            {
+                uOff[i] = abs (uOff[i]) < 1.0e-20f ? 0.0f : uOff[i];
+                vOff[i] = abs (vOff[i]) < 1.0e-20f ? 0.0f : vOff[i];
+            }
+        }
+
+        /// softClamp for an offset from a reference, which leaves an offset alone
+        /// (no rounding through the reference) wherever softClamp would.
+        float clampOffset (float offset, float reference)
+        {
+            let x = reference + offset;
+
+            if (x > 0.9f || ! (x >= 1.0e-12f))
+                return softClamp (x) - reference;
+
+            return offset;
         }
 
         /// Keeps a concentration physical. Identity on [1e-12, 0.9], then a C¹
@@ -413,10 +490,10 @@ namespace GrayScott
             let base = int (floor (p));
             let w = bsplineWeights (p - float (base));
 
-            return w[0] * v.at (base - 1)
-                 + w[1] * v.at (base)
-                 + w[2] * v.at (base + 1)
-                 + w[3] * v.at (base + 2);
+            return w[0] * vOff.at (base - 1)
+                 + w[1] * vOff.at (base)
+                 + w[2] * vOff.at (base + 1)
+                 + w[3] * vOff.at (base + 2);
         }
 
         /// Adds a bipolar amount of V around a position. The clamp keeps the
@@ -427,10 +504,10 @@ namespace GrayScott
             let base = int (floor (p));
             let w = bsplineWeights (p - float (base));
 
-            v.at (base - 1) = softClamp (v.at (base - 1) + w[0] * amount);
-            v.at (base)     = softClamp (v.at (base)     + w[1] * amount);
-            v.at (base + 1) = softClamp (v.at (base + 1) + w[2] * amount);
-            v.at (base + 2) = softClamp (v.at (base + 2) + w[3] * amount);
+            vOff.at (base - 1) = clampOffset (vOff.at (base - 1) + w[0] * amount, vRef);
+            vOff.at (base)     = clampOffset (vOff.at (base)     + w[1] * amount, vRef);
+            vOff.at (base + 1) = clampOffset (vOff.at (base + 1) + w[2] * amount, vRef);
+            vOff.at (base + 2) = clampOffset (vOff.at (base + 2) + w[3] * amount, vRef);
         }
 
         float wrapPosition (float p)
@@ -442,17 +519,27 @@ namespace GrayScott
         //==============================================================================
         void smoothParameters()
         {
-            let c = smoothCoeff;
-            feedS  += (feedT  - feedS)  * c;
-            killS  += (killT  - killS)  * c;
-            duS    += (duT    - duS)    * c;
-            ratioS += (ratioT - ratioS) * c;
-            speedS += (speedT - speedS) * c;
-            driveS += (driveT - driveS) * c;
-            distS  += (distT  - distS)  * c;
-            fbS    += (fbT    - fbS)    * c;
-            mixS   += (mixT   - mixS)   * c;
-            gainS  += (gainT  - gainS)  * c;
+            feedS  = glide (feedS,  feedT);
+            killS  = glide (killS,  killT);
+            duS    = glide (duS,    duT);
+            ratioS = glide (ratioS, ratioT);
+            speedS = glide (speedS, speedT);
+            driveS = glide (driveS, driveT);
+            distS  = glide (distS,  distT);
+            fbS    = glide (fbS,    fbT);
+            mixS   = glide (mixS,   mixT);
+            gainS  = glide (gainS,  gainT);
+        }
+
+        /// One sample of a parameter's glide, landing exactly on the target once
+        /// it's within 1e-6 of it. A glide towards 0 would otherwise end in
+        /// denormals and stay there (x − c·x rounds back to x), and on x86 every
+        /// operation on a denormal is slow: with Resonance at 0, the smoothed value
+        /// is multiplied in at every node of every step, which doubled the cost.
+        float glide (float smoothed, float target)
+        {
+            let d = target - smoothed;
+            return abs (d) < 1.0e-6f ? target : smoothed + d * smoothCoeff;
         }
 
         float<2> dcBlock (float<2> x)
@@ -472,19 +559,266 @@ namespace GrayScott
             return y;
         }
 
-        /// Boost that brings the wet signal up to the input's loudness. Only moves
-        /// while there is input; never cuts.
+        /// The gain that brings the wet signal to the input's loudness: what the
+        /// level model predicts for these settings, glided over ~25 ms, times a trim
+        /// learned while there is input (for its spectrum, and for how far it pushes
+        /// the ring out of its linear range). The prediction moves as soon as a
+        /// setting does, so changing one doesn't leave you waiting for the level;
+        /// the trim carries over from one setting to the next and only has the
+        /// model's error to learn. It freezes without input, so it can't lift noise,
+        /// stretch tails or pump.
         float matchLevel (float<2> x, float<2> raw)
         {
+            predictedS += (predicted - predictedS) * smoothCoeff;
+
             if (inputEnvelope >= inputPresentThreshold)
             {
+                let heard = raw * predictedS;
                 inputPower += (0.5f * (x[0] * x[0] + x[1] * x[1]) - inputPower) * powerCoeff;
-                wetPower   += (0.5f * (raw[0] * raw[0] + raw[1] * raw[1]) - wetPower) * powerCoeff;
-                let target = clamp (sqrt (inputPower / max (wetPower, 1.0e-12f)), 1.0f, maxLevelMatch);
-                levelMatch += (target - levelMatch) * matchCoeff;
+                wetPower   += (0.5f * (heard[0] * heard[0] + heard[1] * heard[1]) - wetPower) * powerCoeff;
+                let target = clamp (sqrt (inputPower / max (wetPower, 1.0e-12f)), 1.0f / maxTrim, maxTrim);
+                trim += (target - trim) * matchCoeff;
             }
 
-            return levelMatch;
+            return clamp (predictedS * trim, minLevelMatch, maxLevelMatch);
+        }
+
+        //==============================================================================
+        // The level model
+        //
+        // How loud the lattice answers varies by ~40 dB across the settings. This
+        // predicts it: the ring linearised around its steady state is 64 pairs of
+        // spatial modes, each a 2×2 linear system, so the wet path's response to a
+        // mono input is a sum of second-order sections,
+        //     H(z) = Σ_q c_q · (P11 − det P · z⁻¹) / (1 − tr P · z⁻¹ + det P · z⁻²)
+        // where P is one sample of the mode's dynamics (its Euler step to the power
+        // of the sub-step count) and c_q how strongly the injectors and the left
+        // pickup couple to it. Its RMS gain for pink noise (equal power per octave,
+        // 20 Hz to 20 kHz), with the DC blocker and the low-pass, is what the wet
+        // path is divided by. On the Play page's resonant band it lands within ~2 dB
+        // of renders; elsewhere, and with heavy Drive, the trim does more of the work.
+        //
+        // It's recomputed only when a setting has moved, a mode or a frequency per
+        // sample: about 130 samples of work, and nothing while settings stay put.
+
+        void initLevelModel (float fs)
+        {
+            for (wrap<numNodes> k)
+            {
+                let angle = 2.0f * float (pi) * float (k) / float (numNodes);
+                ringCos[k] = cos (angle);
+                ringSin[k] = sin (angle);
+            }
+
+            let lo = 20.0f;
+            let hi = min (20000.0f, 0.45f * fs);
+
+            for (wrap<modelPoints> j)
+            {
+                let hz = lo * pow (hi / lo, (float (j) + 0.5f) / float (modelPoints));
+                let w = 2.0f * float (pi) * hz / fs;
+                pointCos[j] = cos (w);
+                pointSin[j] = -sin (w);
+                // |DC blocker · low-pass|² here, both fixed
+                let zi = complex32 (pointCos[j], pointSin[j]);
+                let one = complex32 (1.0f, 0.0f);
+                let dc = (one - zi) / (one - zi * dcCoeff);
+                let lp = (lpB0 + zi * lpB1 + zi * zi * lpB2) / (one + zi * lpA1 + zi * zi * lpA2);
+                let chain = dc * lp;
+                pointChain[j] = chain.real * chain.real + chain.imag * chain.imag;
+            }
+
+            startLevelModel();
+
+            while (modelStage <= modelModes + modelPoints)
+                stepLevelModel();
+
+            predictedS = predicted;
+        }
+
+        /// Takes the settings the model works on.
+        void startLevelModel()
+        {
+            modelF = feedS;
+            modelK = killS;
+            modelDu = duS;
+            modelRatio = ratioS;
+            modelSpeed = speedS;
+            modelFb = fbS;
+            modelDist = distS;
+            modelDrive = driveS;
+
+            let latticeTime = modelSpeed * rateScale;
+            modelSteps = subSteps (latticeTime, modelDu);
+            modelDt = stepLength (latticeTime, modelSteps, modelDu);
+
+            let state = homogeneousState (modelF, modelK);
+            modelU = state[0];
+            modelV = state[1];
+            modelG = 0.0f;
+
+            if (modelV > 0.0f)
+            {
+                let v2 = modelV * modelV;
+                let trace = modelK - v2;
+                let det = (modelF + modelK) * (v2 - modelF);
+                let edge = -(trace + det * modelDt) / (1.0f - (v2 + modelF) * modelDt);
+                modelG = min (modelFb, modelResonanceCap) * max (0.0f, edge);
+            }
+
+            modelStage = 0;
+            modelPower = 0.0f;
+        }
+
+        bool near (float a, float b)    { return abs (a - b) <= 1.0e-4f * abs (b); }
+
+        bool settingsMoved()
+        {
+            return ! (near (modelF, feedS) && near (modelK, killS) && near (modelDu, duS)
+                       && near (modelRatio, ratioS) && near (modelSpeed, speedS) && near (modelDrive, driveS)
+                       && abs (modelFb - fbS) <= 1.0e-3f && abs (modelDist - distS) <= 1.0e-3f);
+        }
+
+        void stepLevelModel()
+        {
+            if (modelStage < modelModes)
+                setUpMode (modelStage);
+            else if (modelStage < modelModes + modelPoints)
+                addFrequency (modelStage - modelModes);
+            else if (modelStage == modelModes + modelPoints)
+                finishLevelModel();
+            else
+            {
+                if (settingsMoved())
+                    startLevelModel();
+
+                return;
+            }
+
+            ++modelStage;
+        }
+
+        /// Mode q = 2m: one sample of its dynamics, and its coupling to the ring's
+        /// injectors and left pickup.
+        void setUpMode (int m)
+        {
+            let q = 2 * m;
+            let lap = ringCos.at (q) - 1.0f;
+            let dt = modelDt;
+            let F = modelF;
+            let K = modelK;
+            let U = modelU;
+            let V = modelV;
+
+            // one Euler step of the linearised reaction-diffusion, then the sub-steps
+            let a00 = 1.0f + dt * (-V * V - F + modelDu * lap);
+            let a01 = dt * (-2.0f * U * V);
+            let a10 = dt * (V * V);
+            let a11 = 1.0f + dt * (2.0f * U * V - (F + K) + modelG + modelDu * modelRatio * lap);
+            var p00 = a00;
+            var p01 = a01;
+            var p10 = a10;
+            var p11 = a11;
+
+            for (int s = 1; s < modelSteps; ++s)
+            {
+                let n00 = p00 * a00 + p01 * a10;
+                let n01 = p00 * a01 + p01 * a11;
+                let n10 = p10 * a00 + p11 * a10;
+                let n11 = p10 * a01 + p11 * a11;
+                p00 = n00;
+                p01 = n01;
+                p10 = n10;
+                p11 = n11;
+            }
+
+            var trace = p00 + p11;
+            var det = p00 * p11 - p01 * p10;
+
+            // A mode that grows (past the edge, or a node near the saddle-node curve)
+            // is taken as just stable: what you hear from it is set by the
+            // saturation the model leaves out.
+            let disc = trace * trace * 0.25f - det;
+
+            if (disc < 0.0f)
+            {
+                if (det > 0.998f)
+                {
+                    trace *= sqrt (0.998f / det);
+                    det = 0.998f;
+                }
+            }
+            else
+            {
+                let r1 = clamp (trace * 0.5f + sqrt (disc), -0.999f, 0.999f);
+                let r2 = clamp (trace * 0.5f - sqrt (disc), -0.999f, 0.999f);
+                trace = r1 + r2;
+                det = r1 * r2;
+            }
+
+            modeP11.at (m) = p11;
+            modeTrace.at (m) = trace;
+            modeDet.at (m) = det;
+
+            // the injectors at nodes 32 and 96 put in the same (B-spline weights
+            // 1/6, 4/6, 1/6 around each); the left pickup reads at 32 + distance
+            let tap = 32.0f + modelDist * maxPickupDistance;
+            let base = int (floor (tap));
+            let w = bsplineWeights (tap - float (base));
+            var tapRe = 0.0f;
+            var tapIm = 0.0f;
+            var injRe = 0.0f;
+            var injIm = 0.0f;
+
+            for (int j = 0; j < 4; ++j)
+            {
+                let t = (q * (base - 1 + j)) & (numNodes - 1);
+                tapRe += w.at (j) * ringCos.at (t);
+                tapIm += w.at (j) * ringSin.at (t);
+                let i = (q * (31 + j)) & (numNodes - 1);
+                let injection = j == 1 ? 4.0f / 6.0f : (j == 3 ? 0.0f : 1.0f / 6.0f);
+                injRe += 2.0f * injection * ringCos.at (i);
+                injIm -= 2.0f * injection * ringSin.at (i);
+            }
+
+            // mode q and its mirror −q together, as a real weight
+            let pair = (q == 0 || q == numNodes / 2) ? 1.0f : 2.0f;
+            modeWeight.at (m) = pair * (tapRe * injRe - tapIm * injIm) / float (numNodes);
+        }
+
+        void addFrequency (int j)
+        {
+            let zi = complex32 (pointCos.at (j), pointSin.at (j));
+            let zi2 = zi * zi;
+            let one = complex32 (1.0f, 0.0f);
+            var y = complex32 (0.0f, 0.0f);
+
+            for (wrap<modelModes> m)
+                y += modeWeight[m] * (modeP11[m] - zi * modeDet[m]) / (one - zi * modeTrace[m] + zi2 * modeDet[m]);
+
+            modelPower += (y.real * y.real + y.imag * y.imag) * pointChain.at (j);
+        }
+
+        void finishLevelModel()
+        {
+            let gain = injectionGain * modelDrive * wetGain * sqrt (modelPower / float (modelPoints));
+            predicted = clamp (1.0f / max (gain, 1.0e-9f), minLevelMatch, 1000.0f);
+        }
+
+        /// Sub-steps per sample: each as long as diffusion allows, Du·dt ≤ ½ (which
+        /// keeps it monotone, STABILITY.md), and no more than 1.25, which keeps the
+        /// reaction's Euler error small. At the default Diffusion that's one step up
+        /// to Speed 1.25, so a 44.1 kHz host doesn't need two steps where 48 kHz
+        /// needs one. If even maxSubSteps can't keep up (sample rates below 24 kHz),
+        /// the lattice runs slow rather than breaking the bound.
+        int subSteps (float latticeTime, float du)
+        {
+            return clamp (int (ceil (latticeTime / min (maxStep, 0.5f / du))), 1, maxSubSteps);
+        }
+
+        float stepLength (float latticeTime, int steps, float du)
+        {
+            return min (min (maxStep, 0.5f / du), latticeTime / float (steps));
         }
 
         /// Resonance as anti-damping, normalised so Resonance 1 is exactly the
@@ -498,16 +832,38 @@ namespace GrayScott
         void updateAntiDamping (float dt)
         {
             let state = homogeneousState (feedS, killS);
-            vStar = state[1];
+            moveReference (state[0], state[1]);
             antiDamping = 0.0f;
 
-            if (vStar > 0.0f)
+            if (vRef > 0.0f)
             {
-                let v2 = vStar * vStar;
+                let v2 = vRef * vRef;
                 let trace = killS - v2;
                 let det = (feedS + killS) * (v2 - feedS);
                 let edge = -(trace + det * dt) / (1.0f - (v2 + feedS) * dt);
                 antiDamping = fbS * max (0.0f, edge);
+            }
+        }
+
+        /// Takes a new reference state (F or K has moved), keeping the concentrations
+        /// where they are. The pickups read offsets, so the DC blocker's memory moves
+        /// with them and doesn't hear the change of reference as a step.
+        void moveReference (float u, float v)
+        {
+            if (u != uRef || v != vRef)
+            {
+                let du = uRef - u;
+                let dv = vRef - v;
+
+                for (wrap<numNodes> i)
+                {
+                    uOff[i] += du;
+                    vOff[i] += dv;
+                }
+
+                dcX1 += dv;
+                uRef = u;
+                vRef = v;
             }
         }
 
@@ -539,19 +895,20 @@ namespace GrayScott
         /// Puts the ring exactly on the steady state for the current F/K: the
         /// homogeneous resonant state where it exists, otherwise the trivial
         /// state. Both are equilibria, so the ring stays silent until the input
-        /// disturbs it. The output filters are primed with the new pickup value
-        /// so the jump in V doesn't thump through the DC blocker.
+        /// disturbs it. The output filters start from rest.
         void seedLattice()
         {
             let state = homogeneousState (feedT, killT);
+            uRef = state[0];
+            vRef = state[1];
 
             for (wrap<numNodes> i)
             {
-                u[i] = state[0];
-                v[i] = state[1];
+                uOff[i] = 0.0f;
+                vOff[i] = 0.0f;
             }
 
-            dcX1 = float<2> (state[1]);
+            dcX1 = float<2>();
             dcY1 = float<2>();
             lpZ1 = float<2>();
             lpZ2 = float<2>();
@@ -587,7 +944,9 @@ namespace GrayScott
         void sendSnapshot (float injL, float injR, float tapL, float tapR)
         {
             LatticeFrame frame;
-            frame.v = v;
+            for (wrap<numNodes> i)
+                frame.v[i] = vRef + vOff[i];
+
             frame.injectL = injL;
             frame.injectR = injR;
             frame.tapL = wrapPosition (tapL);

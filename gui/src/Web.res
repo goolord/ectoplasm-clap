@@ -30,6 +30,8 @@ let toggleClass: (element, string, bool) => unit = %raw(`(el, name, on) => { el.
 @send external setPointerCapture: (element, int) => unit = "setPointerCapture"
 @send external releasePointerCapture: (element, int) => unit = "releasePointerCapture"
 @send external focus: element => unit = "focus"
+@send external selectText: element => unit = "select"
+@get external offsetWidth: element => float = "offsetWidth"
 @send external contains: (element, element) => bool = "contains"
 
 /// The view's shadow root: created once, emptied when the view is mounted again.
@@ -44,6 +46,7 @@ let shadowRootOf: element => element = %raw(`
 @get external clientX: event => float = "clientX"
 @get external clientY: event => float = "clientY"
 @get external pointerId: event => int = "pointerId"
+@get external deltaY: event => float = "deltaY"
 @get external button: event => int = "button"
 @get external key: event => string = "key"
 @get external shiftKey: event => bool = "shiftKey"

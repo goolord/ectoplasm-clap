@@ -2,14 +2,22 @@
 //
 //  * Play (the default): what you see is what you hear. The chemistry as a culture in a dish,
 //    lit up along the resonator ring where your sound is ringing (TuringDish); a plain-language
-//    readout of what you'll hear, and the resonance as a frequency response; and six knobs, in
-//    two groups, that say what they do in the
-//    units you hear — Pitch in Hz and notes, Ring as a decay time, Color as the regime (see
-//    Macro.res for how the macros map onto the parameters).
+//    readout of what you'll hear, and the resonance as a frequency response whose peak you can
+//    drag; and six knobs, in two groups, that say what they do in the units you hear — Pitch as
+//    a note (in tune unless you hold Shift), Ring as a decay time, Color as the regime (see
+//    Macro.res for how the macros map onto the parameters). Click a knob's value to type one.
 //  * Lab: the F×K phase plane and every parameter on a slider.
 //
 // Every parameter lives in one mirror (values). Whatever moves it — a knob, a slider, the phase
 // plane, a preset, host automation — goes through applyValue, so every view agrees.
+//
+// The Play page also keeps two targets, the note and the ring you asked for (targetHz,
+// targetRing). Pitch, Ring, Color and the response plot set them, and realise solves Speed and
+// Resonance for them at the current F and K, so turning one keeps the others where you put them.
+// A target out of reach stays a target: you hear the nearest the chemistry can do, and turning
+// back brings it back. Anything else that moves F, K, Speed or Resonance (the Lab page, a preset,
+// the host) resets the targets to what it put there; the host's echo of a value this view just
+// sent doesn't.
 //
 // What the plugin's web view needs smoothing over comes from nano-clap's Shell.res:
 //
@@ -55,6 +63,7 @@ let stylesheet = `
   --ink: ${Palette.ink};
   --ink-muted: ${Palette.inkMuted};
   --accent: ${Palette.accent};
+  --warn: ${Palette.warn};
   --active: ${Palette.active};
   --fill: ${Palette.hex(Palette.fillRgb)};
   box-sizing: border-box;
@@ -141,6 +150,7 @@ let stylesheet = `
 .gsr .hear-note { display: flex; align-items: baseline; gap: 10px; }
 .gsr .hear-note b { font-size: 40px; line-height: 1; font-weight: 700; color: var(--accent); }
 .gsr .hear-note span { font-size: 16px; color: var(--ink); }
+.gsr .hear-note .cents { color: var(--ink-muted); }
 .gsr .hear-ring { font-size: 15px; color: var(--ink); }
 .gsr .hear-regime { font-size: 12px; color: var(--ink-muted); }
 .gsr .hear-regime b { color: var(--ink); font-weight: 600; }
@@ -161,14 +171,34 @@ let stylesheet = `
 .gsr .time-ago { bottom: 4px; }
 
 /* play page */
-.gsr .response { display: block; border-radius: 6px; }
+.gsr .response { display: block; border-radius: 6px; touch-action: none; }
+.gsr .response.draggable { cursor: grab; }
+.gsr .response.dragging { cursor: grabbing; }
 .gsr .knob-groups { display: grid; grid-template-columns: 1fr 1fr; column-gap: 14px; }
 .gsr .knob-group h2 { margin-bottom: 4px; }
 .gsr .knobs { display: grid; grid-template-columns: repeat(3, 1fr); align-items: start; }
 .gsr .knob { display: grid; justify-items: center; gap: 2px; padding: 4px 0; border-radius: 8px; outline-offset: -2px; }
 .gsr .knob svg { display: block; cursor: ns-resize; touch-action: none; }
 .gsr .knob-label { font-size: 13px; font-weight: 600; color: var(--ink); }
-.gsr .knob-text { font-size: 14px; color: var(--accent); min-height: 17px; }
+.gsr .knob-text { font-size: 14px; color: var(--accent); min-height: 17px; padding: 0 4px; border-radius: 3px; }
+.gsr .knob-text.editable { cursor: text; }
+.gsr .knob-text.editable:hover { background: var(--glass); }
+.gsr .knob-input {
+  display: none; width: 104px; height: 19px; margin: -1px 0; padding: 0 4px;
+  font: inherit; font-size: 14px; text-align: center; color: var(--accent);
+  background: var(--glass); border: 1px solid var(--accent); border-radius: 3px;
+  user-select: text; -webkit-user-select: text;
+}
+.gsr .knob-input:focus-visible { outline: none; }
+.gsr .knob.editing .knob-text { display: none; }
+.gsr .knob.editing .knob-input { display: block; }
+.gsr .invalid { animation: shake 0.4s ease-out; }
+@keyframes shake {
+  0%, 60% { color: var(--warn); border-color: var(--warn); }
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-4px); }
+  40%, 80% { transform: translateX(4px); }
+}
 .gsr .knob-detail { font-size: 11px; color: var(--ink-muted); min-height: 14px; }
 .gsr .knob-track { fill: none; stroke: var(--rule); stroke-width: 5; stroke-linecap: round; }
 .gsr .knob-value { fill: none; stroke: var(--accent); stroke-width: 5; stroke-linecap: round; }
@@ -228,6 +258,16 @@ let playHint = (region: GrayScottTheory.region) =>
   | Solitons => "Loud input fires pulses around the ring."
   | Silent => "Nothing rings here."
   }
+
+// A drag on the response plot's peak: where it started, and which ways it has moved so far (a
+// sideways drag leaves the ring alone, and an up-and-down one the pitch, so an out-of-reach
+// target on the other axis isn't lost to a pixel of wobble).
+type peakDrag = {
+  startHz: float,
+  startRing: float, // Ring knob position
+  mutable across: bool,
+  mutable upDown: bool,
+}
 
 type knobs = {
   pitch: Knob.t,
@@ -359,10 +399,42 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
   let currentK = () => valueOf(Kill)
   let currentSpeed = () => valueOf(Speed)
   let currentResonance = () => valueOf(Feedback)
+  let currentDu = () => valueOf(DiffusionU)
 
   // Views built below call back into send and refreshDerived, which need those views.
   let onPhaseMove: ref<(float, float) => unit> = ref((_, _) => ())
   let onPickupMove: ref<float => unit> = ref(_ => ())
+  let onPeakDragStart = ref(() => ())
+  let onPeakDrag: ref<(float, float, bool) => unit> = ref((_, _, _) => ())
+  let onPeakDragEnd = ref(() => ())
+  let onPlotWheel: ref<(bool, bool) => unit> = ref((_, _) => ())
+
+  // The Play page's targets: the note and the ring you asked for (see the top of this file).
+  let targetHz = ref(220.0)
+  let targetRing = ref(Macro.Fades(0.5))
+  // Something other than the Play page's macros has moved the parameters: what they give now is
+  // the new target. (Where there's no focus there's nothing to read, so the old targets stay.)
+  let adoptTargets = () => {
+    let (f, k, speed, resonance, du) = (
+      currentF(),
+      currentK(),
+      currentSpeed(),
+      currentResonance(),
+      currentDu(),
+    )
+    switch (Macro.pitch(~f, ~k, ~speed, ~resonance, ~du), Macro.ringOf(~f, ~k, ~speed, ~resonance, ~du)) {
+    | (Some(hz), Some(ring)) =>
+      targetHz := hz
+      targetRing := ring
+    | _ => ()
+    }
+  }
+  adoptTargets()
+  let affectsTargets = (p: Param.t) =>
+    switch p {
+    | Feed | Kill | Speed | Feedback | DiffusionU => true
+    | _ => false
+    }
 
   //==============================================================================
   // Views
@@ -389,13 +461,23 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
       ~onGestureEnd=() => Bridge.endGesture(bridge, TapDistance),
     )
   let labLattice = lattice(~width=468, ~kymoHeight=222, ~profileHeight=92)
-  let response = ResponsePlot.make(~width=530, ~height=184)
+  let response = ResponsePlot.make(
+    ~width=530,
+    ~height=184,
+    ~onDragStart=() => onPeakDragStart.contents(),
+    ~onDrag=(~octaves, ~rise, ~fine) => onPeakDrag.contents(octaves, rise, fine),
+    ~onDragEnd=() => onPeakDragEnd.contents(),
+    ~onWheel=(~up, ~fine) => onPlotWheel.contents(up, fine),
+  )
 
   // What you'll hear, in words
   let hearNote = div(~className="hear-note")
   let hearNoteName = createElement("b")
+  let hearCents = createElement("span")
+  setClassName(hearCents, "cents")
   let hearHz = createElement("span")
   hearNote->appendChild(hearNoteName)
+  hearNote->appendChild(hearCents)
   hearNote->appendChild(hearHz)
   let hearRing = div(~className="hear-ring")
   let hearRegime = div(~className="hear-regime")
@@ -493,26 +575,69 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
     let k = currentK()
     let speed = currentSpeed()
     let resonance = currentResonance()
-    ResponsePlot.set(response, ~f, ~k, ~speed, ~resonance)
+    let du = currentDu()
+    ResponsePlot.set(
+      response,
+      {
+        f,
+        k,
+        du,
+        ratio: valueOf(DiffusionRatio),
+        speed,
+        resonance,
+        tap: valueOf(TapDistance),
+        drive: valueOf(Drive),
+        mix: valueOf(Mix),
+        outputDb: valueOf(OutputGain),
+      },
+    )
     PhasePlot.setResonance(phase, resonance)
     knobsRef.contents->Option.forEach(knobs => {
-      let focus = Macro.focus(~f, ~k, ~speed, ~resonance)
+      let focus = Macro.focus(~f, ~k, ~speed, ~resonance, ~du)
       let approximate = Macro.pitchIsApproximate(~ratio=valueOf(DiffusionRatio), ~drive=valueOf(Drive))
       TuringDish.setChemistry(dish, ~f, ~k)
       let region = T.classify(~f, ~k)
+      // where a target is out of reach, which way (what you hear is the nearest it can get)
+      let pitchLimit = hz => {
+        let short = Macro.midiOf(targetHz.contents) -. Macro.midiOf(hz)
+        short > 0.05 ? Some("highest here") : short < -0.05 ? Some("lowest here") : None
+      }
+      let ringLimit = seconds =>
+        switch targetRing.contents {
+        | Fades(target) if seconds < target *. 0.995 => Some("longest here")
+        | Fades(target) if seconds > target *. 1.005 => Some("shortest here")
+        | _ => None
+        }
       switch focus {
       | Some({hz, ringSeconds}) =>
         setTextContent(hearNoteName, (approximate ? "≈ " : "") ++ Macro.noteName(hz))
-        setTextContent(hearHz, Macro.formatHz(hz))
+        let cents = Macro.cents(hz)
+        setTextContent(
+          hearCents,
+          approximate
+            ? ""
+            : Math.Int.abs(cents) > 1
+            ? (cents > 0 ? "+" : "−") ++ Int.toString(Math.Int.abs(cents)) ++ " ¢"
+            : "in tune",
+        )
+        setTextContent(
+          hearHz,
+          Macro.formatHz(hz) ++ pitchLimit(hz)->Option.mapOr("", limit => " (the " ++ limit ++ ")"),
+        )
         setTextContent(
           hearRing,
           switch ringSeconds {
-          | Some(s) => "Rings for " ++ Macro.formatSeconds(s) ++ " after each sound"
+          | Some(s) =>
+            "Rings for " ++
+            Macro.formatSeconds(s) ++
+            " after each sound" ++
+            ringLimit(s)->Option.mapOr("", limit => ", the " ++ limit)
           | None => "Sustains on its own once it's been played"
           },
         )
       | None =>
         setTextContent(hearNoteName, "No note")
+        setTextContent(hearCents, "")
         setTextContent(hearHz, "")
         setTextContent(hearRing, "Nothing rings at this Color. Turn it, or pick a preset.")
       }
@@ -521,8 +646,14 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
       | Some({hz}) =>
         knobs.pitch->Knob.set(
           Macro.hzToNorm(hz),
-          ~text=(approximate ? "≈ " : "") ++ Macro.formatHz(hz),
-          ~detail=Macro.noteName(hz) ++ (approximate ? ", roughly" : ""),
+          ~text=(approximate ? "≈ " : "") ++ Macro.tuning(hz),
+          // (one of the two, to fit on a line: "≈" already says it's rough)
+          ~detail=Macro.formatHz(hz) ++
+          switch (pitchLimit(hz), approximate) {
+          | (Some(limit), _) => ", " ++ limit
+          | (None, true) => ", roughly"
+          | (None, false) => ""
+          },
         )
       | None =>
         knobs.pitch->Knob.set(
@@ -532,12 +663,26 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
           ~muted=true,
         )
       }
-      let ring = Macro.resonanceToRing(resonance)
       switch focus {
       | Some({ringSeconds: Some(seconds)}) =>
-        knobs.ring->Knob.set(ring, ~text=Macro.formatSeconds(seconds), ~detail="to fade 60 dB")
-      | Some({ringSeconds: None}) => knobs.ring->Knob.set(ring, ~text="Sustains", ~detail="self-oscillates")
-      | None => knobs.ring->Knob.set(ring, ~text="No focus", ~detail="turn Color", ~muted=true)
+        knobs.ring->Knob.set(
+          Macro.ringToNorm(Fades(seconds)),
+          ~text=Macro.formatSeconds(seconds),
+          ~detail=ringLimit(seconds)->Option.getOr("to fade 60 dB"),
+        )
+      | Some({ringSeconds: None}) =>
+        knobs.ring->Knob.set(
+          Macro.ringToNorm(Sustains(resonance)),
+          ~text="Sustains",
+          ~detail="self-oscillates",
+        )
+      | None =>
+        knobs.ring->Knob.set(
+          Macro.ringToNorm(targetRing.contents),
+          ~text="No focus",
+          ~detail="turn Color",
+          ~muted=true,
+        )
       }
       let (color, onBand) = Macro.colorOf(~f, ~k)
       let region = T.regionName(T.classify(~f, ~k))
@@ -563,6 +708,7 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
     switch param {
     | Feed | Kill => PhasePlot.setFK(phase, ~f=currentF(), ~k=currentK())
     | Speed => PhasePlot.setSpeed(phase, value)
+    | DiffusionU => PhasePlot.setDiffusion(phase, value)
     | _ => ()
     }
     sliders.contents
@@ -584,6 +730,7 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
     (f, k) => {
       send(Feed, f)
       send(Kill, k)
+      adoptTargets()
       refreshDerived()
     }
   onPickupMove :=
@@ -604,6 +751,7 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
     })
     // start the ring from rest on the new chemistry
     Bridge.reseed(bridge)
+    adoptTargets()
     refreshDerived()
   }
 
@@ -644,16 +792,38 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
   //==============================================================================
   // Play page
 
-  // Pitch is a target the macros hold while the others move: each change re-solves Speed for
-  // the note on show.
-  let heldPitch = () =>
-    Macro.pitch(~f=currentF(), ~k=currentK(), ~speed=currentSpeed(), ~resonance=currentResonance())
-    ->Option.getOr(220.0)
-  let retune = (~f, ~k, ~hz, ~resonance) => {
-    send(Feedback, resonance)
-    send(Speed, Macro.speedFor(~hz, ~f, ~k, ~resonance))
+  // Puts Speed and Resonance where the targets say at the current F and K.
+  let realise = () => {
+    let (f, k) = (currentF(), currentK())
+    let (speed, resonance) = Macro.solve(
+      ~f,
+      ~k,
+      ~hz=targetHz.contents,
+      ~ring=targetRing.contents,
+      ~resonance=currentResonance(),
+      ~du=currentDu(),
+    )
+    if Macro.focus(~f, ~k, ~speed, ~resonance, ~du=currentDu())->Option.isSome {
+      send(Feedback, resonance)
+      send(Speed, speed)
+    } else {
+      // No focus here to tune. A sustain is still a Resonance; a fade waits for Color to bring
+      // the chemistry back to the band.
+      switch targetRing.contents {
+      | Sustains(resonance) => send(Feedback, resonance)
+      | Fades(_) => ()
+      }
+    }
     refreshDerived()
   }
+  let hasFocus = () =>
+    Macro.focus(
+      ~f=currentF(),
+      ~k=currentK(),
+      ~speed=currentSpeed(),
+      ~resonance=currentResonance(),
+      ~du=currentDu(),
+    )->Option.isSome
   let gestures = (params: array<Param.t>) => (
     () => params->Array.forEach(p => Bridge.beginGesture(bridge, p)),
     () => params->Array.forEach(p => Bridge.endGesture(bridge, p)),
@@ -662,14 +832,21 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
   let (tuningStart, tuningEnd) = gestures([Speed, Feedback])
 
   let moveOnBand = color => {
-    let hz = heldPitch()
     let (f, k) = Macro.toFK(color)
     send(Feed, f)
     send(Kill, k)
-    retune(~f, ~k, ~hz, ~resonance=currentResonance())
+    realise()
+  }
+  let setPitch = hz => {
+    targetHz := Math.min(Macro.maxHz, Math.max(Macro.minHz, hz))
+    realise()
+  }
+  let setRing = n => {
+    targetRing := Macro.normToRing(n)
+    realise()
   }
 
-  let paramKnob = (param: Param.t, ~label, ~title) =>
+  let paramKnob = (param: Param.t, ~label, ~title, ~parse, ~typeHint) =>
     Knob.make(
       ~label,
       ~title,
@@ -680,41 +857,70 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
       },
       ~onGestureStart=() => Bridge.beginGesture(bridge, param),
       ~onGestureEnd=() => Bridge.endGesture(bridge, param),
+      ~parse=text => parse(text)->Option.map(v => Param.toNormalised(param, v)),
+      ~typeHint,
     )
   let init = p => Param.spec(p).init
   let (initColor, _) = Macro.colorOf(~f=init(Feed), ~k=init(Kill))
+  let (initHz, initRing) = (
+    Macro.pitch(
+      ~f=init(Feed),
+      ~k=init(Kill),
+      ~speed=init(Speed),
+      ~resonance=init(Feedback),
+      ~du=init(DiffusionU),
+    ),
+    Macro.ringOf(
+      ~f=init(Feed),
+      ~k=init(Kill),
+      ~speed=init(Speed),
+      ~resonance=init(Feedback),
+      ~du=init(DiffusionU),
+    ),
+  )
+  // Pitch snaps to semitones, as knob positions
+  let semitones: Knob.snap = {
+    nearest: n => Macro.hzToNorm(Macro.nearestSemitone(Macro.normToHz(n))),
+    step: (n, steps) => Macro.hzToNorm(Macro.semitoneStep(Macro.normToHz(n), steps)),
+    bigStep: 12,
+  }
   let knobs = {
     pitch: Knob.make(
       ~label="Pitch",
-      ~title="The note the lattice rings at. Color and Ring keep it where you put it.",
-      ~defaultValue=Macro.hzToNorm(
-        Macro.pitch(
-          ~f=init(Feed),
-          ~k=init(Kill),
-          ~speed=init(Speed),
-          ~resonance=init(Feedback),
-        )->Option.getOr(345.0),
-      ),
-      ~onChange=n => {
-        let (f, k) = (currentF(), currentK())
-        switch Macro.focus(~f, ~k, ~speed=currentSpeed(), ~resonance=currentResonance()) {
-        | Some(_) => retune(~f, ~k, ~hz=Macro.normToHz(n), ~resonance=currentResonance())
-        | None =>
+      ~title="The note the lattice rings at, in semitones (hold Shift for anything in between). Color and Ring keep it where you put it.",
+      // (the note nearest the parameters' defaults, so a reset lands in tune)
+      ~defaultValue=Macro.hzToNorm(Macro.nearestSemitone(initHz->Option.getOr(293.66))),
+      ~onChange=n =>
+        if hasFocus() {
+          setPitch(Macro.normToHz(n))
+        } else {
           send(Speed, Param.fromNormalised(Speed, n))
           refreshDerived()
-        }
-      },
+        },
       ~onGestureStart=tuningStart,
       ~onGestureEnd=tuningEnd,
+      ~snap=semitones,
+      ~parse=text => Macro.parsePitch(text)->Option.map(Macro.hzToNorm),
+      ~typeHint="A3, 440 Hz",
     ),
     ring: Knob.make(
       ~label="Ring",
-      ~title="How long it rings. The last part of the turn sustains itself.",
-      ~defaultValue=Macro.resonanceToRing(init(Feedback)),
-      ~onChange=n =>
-        retune(~f=currentF(), ~k=currentK(), ~hz=heldPitch(), ~resonance=Macro.ringToResonance(n)),
+      ~title="How long it rings after each sound. Pitch and Color keep it where you put it. The last part of the turn sustains itself.",
+      ~defaultValue=Macro.ringToNorm(initRing->Option.getOr(Macro.Fades(0.5))),
+      ~onChange=setRing,
       ~onGestureStart=tuningStart,
       ~onGestureEnd=tuningEnd,
+      ~parse=text =>
+        Macro.parseRing(text)->Option.map(ring =>
+          Macro.ringToNorm(
+            // "sustain" while it's already sustaining keeps it as it is
+            switch (ring, targetRing.contents) {
+            | (Sustains(_), Sustains(current)) => Sustains(current)
+            | _ => ring
+            },
+          )
+        ),
+      ~typeHint="1.2 s, 300 ms, sustain",
     ),
     color: Knob.make(
       ~label="Color",
@@ -724,11 +930,73 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
       ~onGestureStart=colorStart,
       ~onGestureEnd=colorEnd,
     ),
-    drive: paramKnob(Drive, ~label="Drive", ~title="How hard the input pushes the chemistry"),
-    mix: paramKnob(Mix, ~label="Mix", ~title="Dry and wet"),
-    output: paramKnob(OutputGain, ~label="Output", ~title="Output level"),
+    drive: paramKnob(
+      Drive,
+      ~label="Drive",
+      ~title="How hard the input pushes the chemistry",
+      ~parse=Macro.parseDecibels,
+      ~typeHint="dB",
+    ),
+    mix: paramKnob(Mix, ~label="Mix", ~title="Dry and wet", ~parse=Macro.parsePercent, ~typeHint="%"),
+    output: paramKnob(
+      OutputGain,
+      ~label="Output",
+      ~title="Output level",
+      ~parse=Macro.parseDecibels,
+      ~typeHint="dB",
+    ),
   }
   knobsRef := Some(knobs)
+
+  // The response plot's peak moves the same targets as the Pitch and Ring knobs, the same way:
+  // sideways in semitones (free with Shift), up and down a Ring knob's turn per 200 px.
+  let peakDrag: ref<option<peakDrag>> = ref(None)
+  onPeakDragStart :=
+    () => {
+      tuningStart()
+      peakDrag :=
+        Some({
+          startHz: Macro.pitch(
+            ~f=currentF(),
+            ~k=currentK(),
+            ~speed=currentSpeed(),
+            ~resonance=currentResonance(),
+            ~du=currentDu(),
+          )->Option.getOr(targetHz.contents),
+          startRing: knobs.ring.value,
+          across: false,
+          upDown: false,
+        })
+    }
+  onPeakDrag :=
+    (octaves, rise, fine) =>
+      peakDrag.contents->Option.forEach(drag => {
+        drag.across = drag.across || Math.abs(octaves) > 0.05
+        drag.upDown = drag.upDown || Math.abs(rise) > 3.0
+        if drag.across {
+          let hz = drag.startHz *. Math.pow(2.0, ~exp=octaves)
+          targetHz :=
+            Math.min(Macro.maxHz, Math.max(Macro.minHz, fine ? hz : Macro.nearestSemitone(hz)))
+        }
+        if drag.upDown {
+          targetRing := Macro.normToRing(drag.startRing +. rise /. (fine ? 1000.0 : 200.0))
+        }
+        if drag.across || drag.upDown {
+          realise()
+        }
+      })
+  onPeakDragEnd :=
+    () => {
+      peakDrag := None
+      tuningEnd()
+    }
+  onPlotWheel :=
+    (up, fine) => {
+      let by = fine ? 0.004 : 0.02
+      tuningStart()
+      setRing(Knob.clamp01(knobs.ring.value +. (up ? by : -.by)))
+      tuningEnd()
+    }
   // a double right-click on a knob that is one parameter opens the host's menu for it
   hostMenu->HostMenu.attach(knobs.pitch.element, Param.id(Speed))
   hostMenu->HostMenu.attach(knobs.ring.element, Param.id(Feedback))
@@ -786,6 +1054,9 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
     ~hostMenu,
     ~onLocalChange=(param, value) => {
       applyValue(param, value)
+      if affectsTargets(param) {
+        adoptTargets()
+      }
       refreshDerived()
     },
     ~extra=reseed,
@@ -870,7 +1141,13 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
   // Host → GUI
 
   Bridge.onParameterChange(bridge, (param, value) => {
+    // (the host echoes what this view sends; only a change from elsewhere resets the targets)
+    let s = Param.spec(param)
+    let fresh = Math.abs(value -. valueOf(param)) > (s.max -. s.min) *. 1e-6
     applyValue(param, value)
+    if fresh && affectsTargets(param) {
+      adoptTargets()
+    }
     refreshDerived()
   })
   Bridge.onLatticeFrame(bridge, frame => {

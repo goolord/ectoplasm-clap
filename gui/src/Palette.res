@@ -33,6 +33,7 @@ let accentRgb: rgb = (142, 230, 140) // ectoplasm green: brand mark, knobs, thum
 let activeRgb: rgb = (236, 246, 228) // the thing under your hand: puck, pickups, Hopf curve
 let oscillationRgb: rgb = (200, 255, 150) // measured self-oscillation
 let fillRgb: rgb = (46, 72, 50) // V profile fill
+let warnRgb: rgb = (236, 150, 112) // a typed value that couldn't be read
 
 let slide = hex(slideRgb)
 let glass = hex(glassRgb)
@@ -41,6 +42,7 @@ let rule = hex(ruleRgb)
 let ink = hex(inkRgb)
 let inkMuted = hex(inkMutedRgb)
 let accent = hex(accentRgb)
+let warn = hex(warnRgb)
 let active = hex(activeRgb)
 let oscillation = hex(oscillationRgb)
 

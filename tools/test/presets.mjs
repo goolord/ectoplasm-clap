@@ -47,12 +47,13 @@ const rms = (x, from, to) => {
   return Math.sqrt(t / Math.max(1, Math.floor(to * rate) - Math.floor(from * rate)));
 };
 const db = (a, b) => 20 * Math.log10(Math.max(a, 1e-12) / Math.max(b, 1e-12));
-// the strongest frequency between 30 Hz and 3 kHz (Hann-windowed Goertzel scan)
+// the strongest frequency between 30 Hz and 3 kHz (Hann-windowed Goertzel scan, in 0.23 % steps: a
+// long ring is a peak well under 1 % wide, which a coarser scan can step over)
 const spectralPeak = (x, from, to) => {
   const a = Math.floor(from * rate), b = Math.floor(to * rate);
   let best = 0, bestHz = 0;
-  for (let step = 0; step <= 400; step++) {
-    const hz = 30 * Math.pow(100, step / 400), w = 2 * Math.PI * hz / rate, c = 2 * Math.cos(w);
+  for (let step = 0; step <= 2000; step++) {
+    const hz = 30 * Math.pow(100, step / 2000), w = 2 * Math.PI * hz / rate, c = 2 * Math.cos(w);
     let s1 = 0, s2 = 0;
     for (let i = a; i < b; i++) {
       const s = x[i] * (0.5 - 0.5 * Math.cos(2 * Math.PI * (i - a) / (b - a))) + c * s1 - s2;
@@ -87,7 +88,7 @@ async function run(preset, index) {
   const sustains = fallDb < 3 && db(rms(x, 4.0, 5.0), burst) > -30;
   const heardT60 = sustains ? Infinity : 60 / fallDb;
   const f = params.feed, k = params.kill, speed = params.speed, resonance = params.feedback;
-  const focus = Macro.focus(f, k, speed, resonance);
+  const focus = Macro.focus(f, k, speed, resonance, params.diffusionU);
   const predictedHz = focus?.hz;
   const shouldSustain = focus !== undefined && focus.ringSeconds === undefined;
   const [, onBand] = Macro.colorOf(f, k);

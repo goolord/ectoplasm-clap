@@ -1,6 +1,7 @@
-// Factory presets. Each sets every parameter. Most are written in macro terms (Color, Ring and a
-// note), so they land on the resonant band at the pitch they name; the last two sit in the Lab
-// view's territory, off the band. `just test` renders every one (tools/test/presets.mjs).
+// Factory presets. Each sets every parameter. Most are written in macro terms (Color, a ring time
+// and a note), so they land on the resonant band at the note and ring time they name; the last
+// two sit in the Lab view's territory, off the band. `just test` renders every one
+// (tools/test/presets.mjs).
 
 module Param = CmajorBindings.Param
 
@@ -40,11 +41,18 @@ let make = (
   ]->Array.map(((p, v)) => (p, Param.clamp(p, v))),
 }
 
-/// A preset on the resonant band: Color, Ring (a knob position), and the note to ring at.
+/// A preset on the resonant band: Color, Ring (a decay time in seconds, or Sustains at a
+/// Resonance), and the note to ring at, solved the way the Play page's knobs are.
 let tuned = (name, description, ~color, ~ring, ~hz, ~diffusion=?, ~ratio=?, ~drive=?, ~pickup=?) => {
   let (f, k) = Macro.toFK(color)
-  let resonance = Macro.ringToResonance(ring)
-  let speed = Macro.speedFor(~hz, ~f, ~k, ~resonance)
+  let (speed, resonance) = Macro.solve(
+    ~f,
+    ~k,
+    ~hz,
+    ~ring,
+    ~resonance=0.9,
+    ~du=diffusion->Option.getOr(Param.spec(DiffusionU).init),
+  )
   make(
     name,
     description,
@@ -71,7 +79,7 @@ let all = [
     "Glass bell",
     "A clean, long ring on C5.",
     ~color=0.55,
-    ~ring=0.68,
+    ~ring=Macro.Fades(0.27),
     ~hz=523.3,
     ~diffusion=0.30,
     ~pickup=0.15,
@@ -80,14 +88,14 @@ let all = [
     "Ecto drone",
     "Past the edge: it keeps singing on A2 after the input stops.",
     ~color=0.35,
-    ~ring=0.9,
+    ~ring=Macro.Sustains(1.13),
     ~hz=110.0,
   ),
   tuned(
     "Slime pluck",
     "Short and rubbery on G3, with Drive pushing the chemistry hard. Hit it with transients.",
     ~color=0.7,
-    ~ring=0.25,
+    ~ring=Macro.Fades(0.14),
     ~hz=196.0,
     ~drive=12.0,
   ),
@@ -95,7 +103,7 @@ let all = [
     "Turing hum",
     "Low Dv/Du lets stripes grow on the ring, so the tone shifts as the pattern settles.",
     ~color=0.9,
-    ~ring=0.5,
+    ~ring=Macro.Fades(0.5),
     ~hz=146.8,
     ~diffusion=0.45,
     ~ratio=0.35,
@@ -105,7 +113,7 @@ let all = [
     "Membrane",
     "A deep, slow skin on C2, with the pickups far from the inputs.",
     ~color=0.2,
-    ~ring=0.55,
+    ~ring=Macro.Fades(0.87),
     ~hz=65.4,
     ~diffusion=0.5,
     ~pickup=0.5,
@@ -114,7 +122,7 @@ let all = [
     "Bright ghost",
     "A thin, whistling ring on C6, picked up right at the inputs.",
     ~color=0.45,
-    ~ring=0.6,
+    ~ring=Macro.Fades(0.09),
     ~hz=1046.5,
     ~pickup=0.05,
   ),

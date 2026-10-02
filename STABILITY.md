@@ -32,13 +32,13 @@ $$g(\theta) = 1 + D\,\Delta t\,\lambda(\theta) \in [\,1 - 2D\Delta t,\ 1\,].$$
 The processor enforces the monotone case by construction:
 
 * $D_u \in [0.05, 0.50]$ and $D_v = D_u \cdot \text{ratio}$ with ratio $\in [0.1, 1.0]$, so $D_v \le D_u \le 0.5$.
-* Speed is split into $n = \lceil \text{speed} \cdot 48000/f_s \rceil$ sub-steps, capped at 8, with $\Delta t = \min(1, \text{speed}\cdot 48000/f_s / n) \le 1$.
+* Each sample's lattice time $T = \text{speed} \cdot 48000/f_s$ is split into $n = \lceil T / \Delta t_\text{max} \rceil$ sub-steps, capped at 8, where $\Delta t_\text{max} = \min(1.25,\ 0.5/D_u)$. Each step is $\Delta t = \min(\Delta t_\text{max}, T/n)$.
 
-So $D\Delta t \le 0.5$ always holds. If you raise the Diffusion ceiling, you must also shrink $\Delta t$ (more sub-steps) to keep $D\Delta t \le 0.5$.
+So $D\Delta t \le D_u \Delta t \le 0.5$ always holds, by construction rather than through the parameter ranges. The steps are as long as that allows, up to 1.25. At the default $D_u = 0.4$ that is one step per sample up to Speed 1.25, so a 44.1 kHz host doesn't pay for two steps where 48 kHz needs one. Raising the Diffusion ceiling would need nothing else changed.
 
 ## 2. Reaction: F and K are about behaviour, not safety
 
-The Jacobian at the trivial state $(1, 0)$ has eigenvalues $-F$ and $-(F+K)$. Euler is stable for $\Delta t\,(F+K) < 2$. The largest value here is $0.16$, so there is a margin of more than 10×.
+The Jacobian at the trivial state $(1, 0)$ has eigenvalues $-F$ and $-(F+K)$. Euler is stable for $\Delta t\,(F+K) < 2$. The largest value here is $0.16$ and $\Delta t \le 1.25$, so there is a margin of nearly 10×.
 
 At the homogeneous state $(U^*, V^*)$, which exists below the saddle-node curve $K = \sqrt F/2 - F$:
 
@@ -46,17 +46,17 @@ $$\operatorname{tr} J = K - V^{*2}, \qquad \det J = (F+K)(V^{*2} - F)$$
 
 Across the whole box $F \in [0.010, 0.090]$, $K \in [0.045, 0.070]$, $\lvert\lambda\rvert \le \sqrt{\det J} < 0.1$. Euler's per-step error is $O(\lambda^2\Delta t^2) \approx 10^{-2}$ relative. That shifts the resonant frequency by about 1% but never destabilises the scheme. The Hopf curve $F + K = \sqrt F\,K^{1/4}$ is a genuine bifurcation of the PDE, not a numerical artefact. Crossing it is supposed to make the ring self-oscillate.
 
-**Invariant region.** Without injection, and with $D\Delta t \le \tfrac12$ and $\Delta t \le 1$:
+**Invariant region.** Without injection, and with $D\Delta t \le \tfrac12$ and $\Delta t \le 1.25$:
 
-* $v' \ge v\,[1 - \Delta t(D_v + F + K)] \ge 0.34\,v$, so **V stays non-negative**.
-* $u' \le u\,[1 - \Delta t(D_u + F)] + \Delta t(D_u \bar u + F)$ is a convex combination of values $\le 1$, so **U stays at or below 1**.
-* $u' \ge 0$ needs $\Delta t\,(D_u + v^2 + F) \le 1$, which holds while $v \lesssim 0.64$.
+* $v' \ge v\,[1 - D_v\Delta t - \Delta t(F + K)] \ge v\,(1 - 0.5 - 0.2) = 0.3\,v$, so **V stays non-negative**.
+* $u' \le u\,[1 - \Delta t(D_u + F)] + \Delta t(D_u \bar u + F)$ is a convex combination of values $\le 1$ (its weights are non-negative, since $\Delta t(D_u + F) \le 0.5 + 1.25 \times 0.09 < 1$), so **U stays at or below 1**.
+* $u' \ge 0$ needs $D_u\Delta t + \Delta t\,(v^2 + F) \le 1$, which holds while $v \lesssim 0.56$ (0.64 where $\Delta t \le 1$).
 * For the homogeneous mode, $w = u + v$ obeys $\dot w = F(1-u) - (F+K)v \le F(1-w)$, so $w$ stays at or below 1.
 
 So the unforced dynamics live in $[0,1]^2$. The cubic term $u v^2$ is bounded by 1 there, and nothing can overflow. Only the forcing term $s_i$ can push a node outside the box: the input adds at most 0.003 × Drive (×16 at +24 dB) ≈ 0.05 per sample. `softClamp` handles that case:
 
 * $[10^{-12}, 0.9]$ maps to itself.
-* Above 0.9 is a C¹ tanh knee with an asymptote at 1.25, which caps $u v^2 \le 1.95$.
+* Above 0.9 is a C¹ tanh knee with an asymptote at 1.25, which caps $u v^2 \le 1.95$. (`integrate` applies the clamp at 0 to every node in its main loop, and runs the knee over the ring only once some node has passed 0.9, which takes strong Drive. Either way, every value has been through the whole clamp before the next step.)
 * Anything below $10^{-12}$ becomes 0. That covers negatives, denormal-range values, and NaN, because NaN fails both comparisons.
 * $+\infty$ becomes 1.25.
 
@@ -69,7 +69,7 @@ So no lattice value can be non-finite after any step, whatever the input. As a f
 | $D\Delta t \le 1$ (e.g. Speed > 1 without sub-steps, or $D_u$ = 1 at $\Delta t$ = 1) | Checkerboard growth, then Inf, then NaN within ~100 ms |
 | Lower clamp at 0 | A negative $v$ makes $u v^2 > 0$ in the U equation while $-(F+K)v$ adds to V. Under strong drive, overshoot can compound until it overflows. |
 | Upper clamp | With $\Delta t = 1$ and $v \gtrsim 1.5$ the cubic term overshoots: $v' \approx v^3$, which overflows float32 in about 6 steps. |
-| Denormal flush | Not a correctness bug, but decaying regimes spend thousands of samples in subnormal arithmetic. On x86 without FTZ/DAZ that is a 10–100× CPU spike. |
+| Denormal flush | Not a correctness bug, but decaying regimes spend thousands of samples in subnormal arithmetic. On x86 without FTZ/DAZ that is a 10–100× CPU spike. The parameter glides have the same trap: a one-pole glide towards 0 ends in denormals and stays there (x − c·x rounds back to x). So `glide` lands exactly on its target once it's within 1e-6. Before it did, Resonance 0 doubled the plugin's CPU, because the smoothed value is multiplied in at every node of every step. |
 
 ### Resonance (anti-damping)
 
@@ -79,7 +79,7 @@ Resonance adds $\Delta t\, g\, A\,d/(A + \lvert d\rvert)$ to $v$ each step, wher
 
 * **Precision.** Diffusive increments near steady state are around $D\Delta t\cdot\delta \approx 10^{-6}$, well above float32's relative epsilon ($1.2\times10^{-7}$) times $\lvert v\rvert \le 1$. Resonances therefore don't stall from round-off. There is no dither: the ring sits exactly on an equilibrium until the input moves it.
 * **Cancellation.** $F(1-u)$ near $u = 1$ loses a few bits, but that term is O(F) and the error is far below anything audible.
-* **Accumulation.** The ring's total mass is summed in float32 every step for collapse detection only. It never feeds back into the dynamics.
+* **Accumulation.** The ring's total mass is summed in float32 every 64 samples, for collapse detection only. It never feeds back into the dynamics.
 
 ## 4. Fixed-point port
 

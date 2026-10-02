@@ -43,6 +43,7 @@ type t = {
   mutable k: float,
   mutable speed: float,
   mutable resonance: float,
+  mutable du: float,
   mutable dragging: bool,
   mutable dirty: bool,
   // asks the app for a repaint (it renders on demand, not every frame)
@@ -249,7 +250,7 @@ let updateReadout = plot => {
   )
   setTextContent(
     plot.resonanceLabel,
-    switch Macro.focus(~f=plot.f, ~k=plot.k, ~speed=plot.speed, ~resonance=plot.resonance) {
+    switch Macro.focus(~f=plot.f, ~k=plot.k, ~speed=plot.speed, ~resonance=plot.resonance, ~du=plot.du) {
     | Some({hz, ringSeconds: None}) => "Sustains at " ++ Macro.formatHz(hz)
     | Some({hz, ringSeconds: Some(s)}) =>
       "Rings at " ++ Macro.formatHz(hz) ++ ", fades 60 dB in " ++ Macro.formatSeconds(s)
@@ -308,6 +309,11 @@ let setSpeed = (plot, speed) => {
   updateReadout(plot)
 }
 
+let setDiffusion = (plot, du) => {
+  plot.du = du
+  updateReadout(plot)
+}
+
 let make = (
   ~onChange: (~f: float, ~k: float) => unit,
   ~onGestureStart: unit => unit,
@@ -353,6 +359,7 @@ let make = (
     k: CmajorBindings.Param.spec(Kill).init,
     speed: 1.0,
     resonance: CmajorBindings.Param.spec(Feedback).init,
+    du: CmajorBindings.Param.spec(DiffusionU).init,
     dragging: false,
     dirty: true,
     invalidate: () => (),
