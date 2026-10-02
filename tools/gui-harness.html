@@ -19,6 +19,17 @@
 // exercised in a plain browser.
 import createPatchView from "../gui/dist/index.js";
 
+// ?cpu: hide WebGL 2, to check the dish's CPU fallback
+if (new URLSearchParams(location.search).has("cpu")) {
+  const getContext = HTMLCanvasElement.prototype.getContext;
+  HTMLCanvasElement.prototype.getContext = function (type, ...rest) { return type === "webgl2" ? null : getContext.call(this, type, ...rest); };
+}
+// ?timer-raf: drive animation frames from a timer, for preview panes that only paint on demand
+if (new URLSearchParams(location.search).has("timer-raf")) {
+  window.requestAnimationFrame = (f) => setTimeout(() => f(performance.now()), 16);
+  window.cancelAnimationFrame = (id) => clearTimeout(id);
+}
+
 const N = 128;
 const log = (...a) => { const el = document.getElementById("log"); el.textContent += a.join(" ") + "\n"; el.scrollTop = 1e9; };
 const params = { feed: 0.04462, kill: 0.0585, diffusionU: 0.4, diffusionRatio: 1.0, speed: 1, drive: 0,
@@ -46,6 +57,7 @@ function step(dt) {
 // Simulated input: a 0.4 s noise burst every 1.5 s, injected every lattice step the way the
 // processor does it (0.003 per sample at Drive 0 dB, spread over four nodes)
 let bursting = false;
+let mockLevel = 0;
 function inject() {
   if (!bursting) return;
   for (const c of [32, 96]) for (let j = -1; j <= 2; j++) {
@@ -83,11 +95,13 @@ let last = performance.now();
 setInterval(() => {
   const now = performance.now();
   bursting = (now % 1500) < 400;
+  // the output level the processor reports: up while a burst plays, fading after
+  mockLevel = bursting ? 0.25 : mockLevel * 0.9;
   const steps = Math.min(3200, Math.round(1600 * params.speed));
   const sub = Math.max(1, Math.ceil(params.speed)), dt = params.speed / sub;
   for (let s = 0; s < steps / sub; s++) { inject(); for (let k = 0; k < sub; k++) step(dt); }
   const dist = params.tapDistance * 12;
-  const frame = { v: Array.from(v), injectL: 32, injectR: 96, tapL: 32 + dist, tapR: 96 - dist, level: 0.1 + 0.05 * Math.sin(now / 700) };
+  const frame = { v: Array.from(v), injectL: 32, injectR: 96, tapL: 32 + dist, tapR: 96 - dist, level: mockLevel };
   for (const l of endpointListeners.get("lattice") ?? []) l(frame);
   last = now;
 }, 1000 / 30);

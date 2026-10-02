@@ -99,7 +99,5 @@ let rampLut: array<int> = {
 /// Typical V range in active regimes; values above saturate the profile.
 let vFullScale = 0.45
 
-// Cellular-automaton states (CellAutomaton.res): empty, fading (alive a moment ago), alive, and
-// just born, which glows.
-let cellColours: array<rgb> = [(13, 17, 13), (36, 74, 42), (98, 186, 104), (214, 255, 186)]
-let cellGapRgb: rgb = (7, 9, 7)
+// The culture in the Play page's dish (TuringDish.res)
+let cultureRgb: rgb = (74, 150, 82)

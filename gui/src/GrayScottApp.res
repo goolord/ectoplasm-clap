@@ -1,8 +1,9 @@
 // Top-level view: two pages on one stage, wired to the patch through the typed Bridge.
 //
-//  * Play (the default): what you see is what you hear. The ring itself, live, read as a
-//    cellular automaton (a petri dish and a spacetime grid of cells); the resonance it will
-//    put on a sound, as a frequency response; and six knobs that say what they do in the
+//  * Play (the default): what you see is what you hear. The chemistry as a culture in a dish,
+//    lit up along the resonator ring where your sound is ringing (TuringDish); a plain-language
+//    readout of what you'll hear, and the resonance as a frequency response; and six knobs, in
+//    two groups, that say what they do in the
 //    units you hear — Pitch in Hz and notes, Ring as a decay time, Color as the regime (see
 //    Macro.res for how the macros map onto the parameters).
 //  * Lab: the F×K phase plane and every parameter on a slider.
@@ -132,8 +133,18 @@ let stylesheet = `
 .gsr .page { display: none; min-height: 0; }
 .gsr .page.on { display: grid; }
 .gsr .play { grid-template-rows: auto auto 1fr; row-gap: 10px; }
-.gsr .play-top { display: grid; grid-template-columns: 262px 1fr; column-gap: 10px; }
-.gsr .dish { display: block; border-radius: 6px; background: var(--glass); }
+.gsr .play-top { display: grid; grid-template-columns: 304px 1fr; column-gap: 14px; }
+.gsr .dish-box { display: grid; gap: 4px; }
+.gsr .dish { display: block; border-radius: 8px; background: var(--glass); }
+.gsr .caption { color: var(--ink-muted); font-size: 11px; line-height: 1.35; }
+.gsr .hear { display: grid; align-content: start; gap: 8px; }
+.gsr .hear-note { display: flex; align-items: baseline; gap: 10px; }
+.gsr .hear-note b { font-size: 40px; line-height: 1; font-weight: 700; color: var(--accent); }
+.gsr .hear-note span { font-size: 16px; color: var(--ink); }
+.gsr .hear-ring { font-size: 15px; color: var(--ink); }
+.gsr .hear-regime { font-size: 12px; color: var(--ink-muted); }
+.gsr .hear-regime b { color: var(--ink); font-weight: 600; }
+.gsr .hear-label { margin-top: 6px; font-size: 11px; color: var(--ink-muted); }
 .gsr .lab { grid-template-rows: 1fr auto; row-gap: 10px; }
 
 /* the lattice view (both pages) */
@@ -151,7 +162,9 @@ let stylesheet = `
 
 /* play page */
 .gsr .response { display: block; border-radius: 6px; }
-.gsr .knobs { display: grid; grid-template-columns: repeat(6, 1fr); align-items: start; }
+.gsr .knob-groups { display: grid; grid-template-columns: 1fr 1fr; column-gap: 14px; }
+.gsr .knob-group h2 { margin-bottom: 4px; }
+.gsr .knobs { display: grid; grid-template-columns: repeat(3, 1fr); align-items: start; }
 .gsr .knob { display: grid; justify-items: center; gap: 2px; padding: 4px 0; border-radius: 8px; outline-offset: -2px; }
 .gsr .knob svg { display: block; cursor: ns-resize; touch-action: none; }
 .gsr .knob-label { font-size: 13px; font-weight: 600; color: var(--ink); }
@@ -204,6 +217,18 @@ let stylesheet = `
 
 type page = Play | Lab
 
+// What each regime does, in the Play page's terms
+let playHint = (region: GrayScottTheory.region) =>
+  switch region {
+  | Chaos => "Rough and restless: it never quite settles."
+  | Drones => "A clean, tuned resonance. Turn up Ring to make it sing."
+  | Stripes => "A resonance with patterns forming in the chemistry."
+  | Damped => "Short, plucky rings."
+  | Spots => "Input sparks short-lived spots; little ringing."
+  | Solitons => "Loud input fires pulses around the ring."
+  | Silent => "Nothing rings here."
+  }
+
 type knobs = {
   pitch: Knob.t,
   ring: Knob.t,
@@ -215,10 +240,9 @@ type knobs = {
 
 type t = {
   bridge: Bridge.t,
-  dish: PetriDish.t,
+  dish: TuringDish.t,
   phase: PhasePlot.t,
   labLattice: LatticeView.t,
-  playLattice: LatticeView.t,
   response: ResponsePlot.t,
   meterFill: element,
   mutable page: page,
@@ -233,8 +257,7 @@ let render = app => {
   app.frameHandle = None
   switch app.page {
   | Play =>
-    PetriDish.render(app.dish)
-    LatticeView.render(app.playLattice)
+    TuringDish.render(app.dish)
     ResponsePlot.render(app.response)
   | Lab =>
     PhasePlot.render(app.phase)
@@ -355,21 +378,27 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
       Bridge.endGesture(bridge, Kill)
     },
   )
-  let automaton = CellAutomaton.make()
-  let dish = PetriDish.make(~size=262, ~ca=automaton)
-  let lattice = (~width, ~kymoHeight, ~profileHeight, ~cells=?) =>
+  let dish = TuringDish.make(~size=304)
+  let lattice = (~width, ~kymoHeight, ~profileHeight) =>
     LatticeView.make(
       ~width,
       ~kymoHeight,
       ~profileHeight,
-      ~cells?,
       ~onPickupDistance=d => onPickupMove.contents(d),
       ~onGestureStart=() => Bridge.beginGesture(bridge, TapDistance),
       ~onGestureEnd=() => Bridge.endGesture(bridge, TapDistance),
     )
   let labLattice = lattice(~width=468, ~kymoHeight=222, ~profileHeight=92)
-  let playLattice = lattice(~width=576, ~kymoHeight=164, ~profileHeight=92, ~cells=automaton)
-  let response = ResponsePlot.make(~width=848, ~height=92)
+  let response = ResponsePlot.make(~width=530, ~height=184)
+
+  // What you'll hear, in words
+  let hearNote = div(~className="hear-note")
+  let hearNoteName = createElement("b")
+  let hearHz = createElement("span")
+  hearNote->appendChild(hearNoteName)
+  hearNote->appendChild(hearHz)
+  let hearRing = div(~className="hear-ring")
+  let hearRegime = div(~className="hear-regime")
 
   //==============================================================================
   // Header
@@ -423,7 +452,6 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
     dish,
     phase,
     labLattice,
-    playLattice,
     response,
     meterFill,
     page: Play,
@@ -435,7 +463,6 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
   phase.invalidate = () => invalidate(app)
   dish.invalidate = () => invalidate(app)
   labLattice.invalidate = () => invalidate(app)
-  playLattice.invalidate = () => invalidate(app)
   response.invalidate = () => invalidate(app)
 
   let sliders: ref<array<Controls.slider>> = ref([])
@@ -471,13 +498,25 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
     knobsRef.contents->Option.forEach(knobs => {
       let focus = Macro.focus(~f, ~k, ~speed, ~resonance)
       let approximate = Macro.pitchIsApproximate(~ratio=valueOf(DiffusionRatio), ~drive=valueOf(Drive))
-      PetriDish.setCaption(
-        dish,
-        switch focus {
-        | Some({hz}) => (approximate ? "≈ " : "") ++ Macro.formatHz(hz)
-        | None => ""
-        },
-      )
+      TuringDish.setChemistry(dish, ~f, ~k)
+      let region = T.classify(~f, ~k)
+      switch focus {
+      | Some({hz, ringSeconds}) =>
+        setTextContent(hearNoteName, (approximate ? "≈ " : "") ++ Macro.noteName(hz))
+        setTextContent(hearHz, Macro.formatHz(hz))
+        setTextContent(
+          hearRing,
+          switch ringSeconds {
+          | Some(s) => "Rings for " ++ Macro.formatSeconds(s) ++ " after each sound"
+          | None => "Sustains on its own once it's been played"
+          },
+        )
+      | None =>
+        setTextContent(hearNoteName, "No note")
+        setTextContent(hearHz, "")
+        setTextContent(hearRing, "Nothing rings at this Color. Turn it, or pick a preset.")
+      }
+      setInnerHTML(hearRegime, "<b>" ++ T.regionName(region) ++ ".</b> " ++ playHint(region))
       switch focus {
       | Some({hz}) =>
         knobs.pitch->Knob.set(
@@ -697,17 +736,41 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
   hostMenu->HostMenu.attach(knobs.mix.element, Param.id(Mix))
   hostMenu->HostMenu.attach(knobs.output.element, Param.id(OutputGain))
 
-  let knobRow = div(~className="knobs")
-  [knobs.pitch, knobs.ring, knobs.color, knobs.drive, knobs.mix, knobs.output]->Array.forEach(k =>
-    knobRow->appendChild(k.element)
-  )
+  let knobGroup = (title, members: array<Knob.t>) => {
+    let group = div(~className="knob-group")
+    let heading = createElement("h2")
+    setTextContent(heading, title)
+    group->appendChild(heading)
+    let row = div(~className="knobs")
+    members->Array.forEach(k => row->appendChild(k.element))
+    group->appendChild(row)
+    group
+  }
+  let knobRow = div(~className="knob-groups")
+  knobRow->appendChild(knobGroup("The resonance", [knobs.pitch, knobs.ring, knobs.color]))
+  knobRow->appendChild(knobGroup("In and out", [knobs.drive, knobs.mix, knobs.output]))
 
   let playPage = div(~className="page play")
   let playTop = div(~className="play-top")
-  playTop->appendChild(dish.element)
-  playTop->appendChild(playLattice.element)
+  let dishBox = div(~className="dish-box")
+  dishBox->appendChild(dish.element)
+  let dishCaption = div(~className="caption")
+  setTextContent(
+    dishCaption,
+    "The chemistry at this Color, grown in a dish. It lights up along the ring where your sound is ringing.",
+  )
+  dishBox->appendChild(dishCaption)
+  let hear = div(~className="hear")
+  hear->appendChild(hearNote)
+  hear->appendChild(hearRing)
+  hear->appendChild(hearRegime)
+  let responseLabel = div(~className="hear-label")
+  setTextContent(responseLabel, "What it does to your sound")
+  hear->appendChild(responseLabel)
+  hear->appendChild(response.element)
+  playTop->appendChild(dishBox)
+  playTop->appendChild(hear)
   playPage->appendChild(playTop)
-  playPage->appendChild(response.element)
   playPage->appendChild(knobRow)
 
   //==============================================================================
@@ -750,9 +813,8 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
     playButton->toggleClass("on", page == Play)
     labButton->toggleClass("on", page == Lab)
     // what was hidden may be stale
-    playLattice.dirty = true
     labLattice.dirty = true
-    dish.dirty = true
+    dish.pending = true
     response.dirty = true
     phase.dirty = true
     invalidate(app)
@@ -812,10 +874,8 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
     refreshDerived()
   })
   Bridge.onLatticeFrame(bridge, frame => {
-    CellAutomaton.push(automaton, frame.v)
-    PetriDish.setFrame(dish, frame)
+    TuringDish.setFrame(dish, frame)
     LatticeView.pushFrame(labLattice, frame)
-    LatticeView.pushFrame(playLattice, frame)
     app.level = frame.level
   })
 
@@ -828,6 +888,7 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
     stopPageSetting,
     () => settings->Settings.dispose,
     () => hostMenu->HostMenu.dispose,
+    () => TuringDish.stop(dish),
   ]
   invalidate(app)
   app

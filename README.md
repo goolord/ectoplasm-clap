@@ -4,7 +4,7 @@ A stereo resonator effect built on a 1D Gray-Scott reaction-diffusion ring of 12
 
 The GUI is written in ReScript and has two pages:
 
-* **Play** (the default) shows what you'll hear. It has the live ring drawn as a cellular automaton (a petri dish and a grid of cells), the frequency response the ring will put on a sound, and six knobs: Pitch, Ring, Color, Drive, Mix and Output. Each knob reads in the units you hear: Hz and note names, decay time, and the chemical regime.
+* **Play** (the default) shows what you'll hear. It has the chemistry as a culture in a dish, lit up along the resonator ring where your sound is ringing. Beside it is a plain-language readout (the note, how long it rings, the regime) and the frequency response the ring puts on a sound. Below are six knobs in two groups: Pitch, Ring and Color shape the resonance; Drive, Mix and Output handle what goes in and out.
 * **Lab** shows the F×K phase plane, with the analytic Hopf and saddle-node curves and a measured overlay, plus every parameter on a slider.
 
 A preset menu in the header has nine factory presets.
@@ -20,8 +20,8 @@ A preset menu in the header has nine factory presets.
 | `gui/src/GrayScottApp.res` | App shell: the two pages, header and preset menu, one parameter mirror, scaling, rendering on demand |
 | `gui/src/Macro.res` | The macros (Color, Ring, Pitch) and the discrete-time focus arithmetic behind the readouts |
 | `gui/src/Presets.res` | Factory presets |
-| `gui/src/Knob.res`, `ResponsePlot.res`, `PetriDish.res` | Play page widgets |
-| `gui/src/CellAutomaton.res` | Reads the ring as a 1D cellular automaton, with the history and the pixel-map painter the cell views share |
+| `gui/src/Knob.res`, `ResponsePlot.res` | Play page widgets |
+| `gui/src/TuringDish.res`, `turing-gl.js` | The Play page's dish: a 2D Gray-Scott culture on the GPU (WebGL 2, with a CPU fallback), and its typed wrapper |
 | `gui/src/PhasePlot.res`, `Controls.res` | Lab page widgets |
 | `gui/src/LatticeView.res` | Kymograph and V-profile view, with draggable pickups (both pages) |
 | `gui/src/CmajorBindings.res` | Typed `PatchConnection` bindings, the `Param` model, and the glitch-free `Bridge` |
@@ -63,12 +63,12 @@ That builds `dist/Ectoplasm.clap`. The steps are: install npm packages if they'r
 
 ## The Play page
 
-**The culture.** The ring is a one-dimensional cellular automaton: 128 cells, each updated from its neighbours every step. The Play page draws it that way:
+**The dish** is the chemistry the way people picture reaction-diffusion: a 2D Gray-Scott culture of labyrinths and spots, grown on the GPU from the plugin's own F and K. The sound comes from the 1D ring, and the ring is drawn as a circle through the culture. Where the ring is ringing, the culture's blobs along that circle light up. The ring's activity is also fed into the culture there, so playing reshapes the pattern along the ring.
 
-* The **petri dish** lays the ring around a circle, node 0 at twelve o'clock. Each generation (a lattice snapshot, 30 a second) is a ring of cells, newest at the rim and older ones growing inward. Injectors are marked outside the rim and pickups on it, and the middle shows the pitch.
-* The **cell grid** beside it is the same history as a spacetime diagram, newest generation at the top, above the live V profile with its draggable pickups.
-
-A cell is alive while its V stands above the rest of its generation: its deviation from the ring's median, against a slowly adapting range, with hysteresis. Newborn cells glow and dying ones fade. Measuring against the median keeps the ring's uniform swing, which is the resonance you hear, from flooding whole generations. What's left is what happens across the ring. At rest the dish is empty. Input seeds colonies at the injectors that spread and branch, then die back as the disturbance fades. Each view maps its pixels to cells once, so a generation costs one pass over a small 1× image, scaled up with crisp edges.
+* **Colour changes the culture.** Turning Color moves the dish through Gray-Scott's textures: labyrinths along the resonant band, self-replicating spots above the saddle-node curve, nothing at all where nothing grows.
+* **The culture is shown with a pattern-forming diffusion ratio**, Dv/Du = 0.2, whatever the plugin's own setting. At 0.2 the homogeneous state is Turing-unstable all along the Color band, so labyrinths form. At 0.5, the usual choice, the dish fills with a featureless sheet there. The plugin's ring runs at Dv/Du = 1 by default, where it rings cleanly instead of patterning. So the dish shows the chemistry's character; the readout and response curve show the sound.
+* **What lights up.** Each node's highlight is its deviation from the ring's median (local activity) plus the output level (the ring's uniform swing, most of what you hear). Highlights rise fast and fade gently.
+* **Cost.** It runs 600 culture steps a second on a 300×300 grid, only while the Play page is showing. Where WebGL 2 float render targets aren't available, an 80×80 CPU version runs the same chemistry. In the harness, `?cpu` forces it and `?timer-raf` keeps it animating in panes that only paint on demand.
 
 | Knob | Sets | Shows |
 |---|---|---|
