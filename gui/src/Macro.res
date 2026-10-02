@@ -75,8 +75,7 @@ let focus = (~f, ~k, ~speed, ~resonance, ~du) =>
     } else {
       // Resonance: anti-damping g, normalised to the discrete edge |1 + λ·dt| = 1 (with the
       // trace and determinant g shifts; see updateAntiDamping in the processor)
-      let edge = -.(trace +. det *. dt) /. (1.0 -. (v2 +. f) *. dt)
-      let g = resonance *. Math.max(0.0, edge)
+      let g = resonance *. LevelModel.edgeGain(~f, ~k, ~v, ~dt)
       let trace' = trace +. g
       let det' = det -. g *. (v2 +. f)
       let omega'Squared = det' -. trace' *. trace' /. 4.0
@@ -128,6 +127,7 @@ let pitchIsApproximate = (~ratio, ~drive) => ratio < 0.95 || drive > 9.0
 // Knob position ↔ Hz, logarithmic.
 let minHz = 20.0
 let maxHz = 2000.0
+let clampHz = hz => Math.min(maxHz, Math.max(minHz, hz))
 let hzToNorm = hz => clamp01(Math.log(hz /. minHz) /. Math.log(maxHz /. minHz))
 let normToHz = n => minHz *. Math.pow(maxHz /. minHz, ~exp=clamp01(n))
 
@@ -162,15 +162,14 @@ let cents = hz => {
   Float.toInt(Math.round((m -. Math.round(m)) *. 100.0))
 }
 
-/// The note, and the offset when it's more than a cent out: "D4", "D4 −13 ¢".
-let tuning = hz => {
+/// The offset from the nearest note when it's more than a cent out: "−13 ¢".
+let centsText = hz => {
   let c = cents(hz)
-  noteName(hz) ++ (
-    Math.Int.abs(c) > 1
-      ? " " ++ (c > 0 ? "+" : "−") ++ Int.toString(Math.Int.abs(c)) ++ " ¢"
-      : ""
-  )
+  Math.Int.abs(c) > 1 ? Some((c > 0 ? "+" : "−") ++ Int.toString(Math.Int.abs(c)) ++ " ¢") : None
 }
+
+/// The note, and the offset when it's more than a cent out: "D4", "D4 −13 ¢".
+let tuning = hz => noteName(hz) ++ centsText(hz)->Option.mapOr("", c => " " ++ c)
 
 let formatHz = hz =>
   hz >= 1000.0
@@ -226,15 +225,15 @@ let normToRing = n => {
 /// What a typed "sustain" sustains at: comfortably past the edge.
 let typedSustainResonance = 1.1
 
-/// The ring the processor gives with these parameters (what the app adopts as its target when
-/// something other than the macros moves them), or None where there's no focus.
-let ringOf = (~f, ~k, ~speed, ~resonance, ~du) =>
-  focus(~f, ~k, ~speed, ~resonance, ~du)->Option.map(({ringSeconds}) =>
-    switch ringSeconds {
-    | Some(s) => Fades(s)
-    | None => Sustains(resonance)
-    }
-  )
+/// The note and the ring a focus gives at this Resonance (what the app adopts as its targets
+/// when something other than the macros moves the parameters).
+let targetsOf = ({hz, ringSeconds}: focus, ~resonance) => (
+  hz,
+  switch ringSeconds {
+  | Some(s) => Fades(s)
+  | None => Sustains(resonance)
+  },
+)
 
 /// The Resonance, between 0 and 0.97, whose decay time is closest to seconds. Decay time rises
 /// monotonically with Resonance there, so bisection finds it; out of reach, it's the end nearest.
@@ -291,10 +290,9 @@ let matchOf = (pattern, text) =>
   ->RegExp.exec(tidy(text))
   ->Option.map(RegExp.Result.matches)
 
-let numberAt = (groups: array<option<string>>, i) =>
-  groups[i]->Option.flatMap(x => x)->Option.flatMap(Float.fromString)
-
 let groupAt = (groups: array<option<string>>, i) => groups[i]->Option.flatMap(x => x)
+
+let numberAt = (groups, i) => groupAt(groups, i)->Option.flatMap(Float.fromString)
 
 let noteLetters = dict{"c": 0, "d": 2, "e": 4, "f": 5, "g": 7, "a": 9, "b": 11}
 

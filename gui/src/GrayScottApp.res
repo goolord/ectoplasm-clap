@@ -414,21 +414,20 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
   let targetRing = ref(Macro.Fades(0.5))
   // Something other than the Play page's macros has moved the parameters: what they give now is
   // the new target. (Where there's no focus there's nothing to read, so the old targets stay.)
-  let adoptTargets = () => {
-    let (f, k, speed, resonance, du) = (
-      currentF(),
-      currentK(),
-      currentSpeed(),
-      currentResonance(),
-      currentDu(),
+  let currentFocus = () =>
+    Macro.focus(
+      ~f=currentF(),
+      ~k=currentK(),
+      ~speed=currentSpeed(),
+      ~resonance=currentResonance(),
+      ~du=currentDu(),
     )
-    switch (Macro.pitch(~f, ~k, ~speed, ~resonance, ~du), Macro.ringOf(~f, ~k, ~speed, ~resonance, ~du)) {
-    | (Some(hz), Some(ring)) =>
+  let adoptTargets = () =>
+    currentFocus()->Option.forEach(focus => {
+      let (hz, ring) = Macro.targetsOf(focus, ~resonance=currentResonance())
       targetHz := hz
       targetRing := ring
-    | _ => ()
-    }
-  }
+    })
   adoptTargets()
   let affectsTargets = (p: Param.t) =>
     switch p {
@@ -611,15 +610,7 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
       switch focus {
       | Some({hz, ringSeconds}) =>
         setTextContent(hearNoteName, (approximate ? "≈ " : "") ++ Macro.noteName(hz))
-        let cents = Macro.cents(hz)
-        setTextContent(
-          hearCents,
-          approximate
-            ? ""
-            : Math.Int.abs(cents) > 1
-            ? (cents > 0 ? "+" : "−") ++ Int.toString(Math.Int.abs(cents)) ++ " ¢"
-            : "in tune",
-        )
+        setTextContent(hearCents, approximate ? "" : Macro.centsText(hz)->Option.getOr("in tune"))
         setTextContent(
           hearHz,
           Macro.formatHz(hz) ++ pitchLimit(hz)->Option.mapOr("", limit => " (the " ++ limit ++ ")"),
@@ -816,14 +807,7 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
     }
     refreshDerived()
   }
-  let hasFocus = () =>
-    Macro.focus(
-      ~f=currentF(),
-      ~k=currentK(),
-      ~speed=currentSpeed(),
-      ~resonance=currentResonance(),
-      ~du=currentDu(),
-    )->Option.isSome
+  let hasFocus = () => currentFocus()->Option.isSome
   let gestures = (params: array<Param.t>) => (
     () => params->Array.forEach(p => Bridge.beginGesture(bridge, p)),
     () => params->Array.forEach(p => Bridge.endGesture(bridge, p)),
@@ -838,7 +822,7 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
     realise()
   }
   let setPitch = hz => {
-    targetHz := Math.min(Macro.maxHz, Math.max(Macro.minHz, hz))
+    targetHz := Macro.clampHz(hz)
     realise()
   }
   let setRing = n => {
@@ -862,22 +846,16 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
     )
   let init = p => Param.spec(p).init
   let (initColor, _) = Macro.colorOf(~f=init(Feed), ~k=init(Kill))
-  let (initHz, initRing) = (
-    Macro.pitch(
+  let (initHz, initRing) =
+    Macro.focus(
       ~f=init(Feed),
       ~k=init(Kill),
       ~speed=init(Speed),
       ~resonance=init(Feedback),
       ~du=init(DiffusionU),
-    ),
-    Macro.ringOf(
-      ~f=init(Feed),
-      ~k=init(Kill),
-      ~speed=init(Speed),
-      ~resonance=init(Feedback),
-      ~du=init(DiffusionU),
-    ),
-  )
+    )
+    ->Option.map(Macro.targetsOf(_, ~resonance=init(Feedback)))
+    ->Option.getOr((293.66, Macro.Fades(0.5)))
   // Pitch snaps to semitones, as knob positions
   let semitones: Knob.snap = {
     nearest: n => Macro.hzToNorm(Macro.nearestSemitone(Macro.normToHz(n))),
@@ -889,7 +867,7 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
       ~label="Pitch",
       ~title="The note the lattice rings at, in semitones (hold Shift for anything in between). Color and Ring keep it where you put it.",
       // (the note nearest the parameters' defaults, so a reset lands in tune)
-      ~defaultValue=Macro.hzToNorm(Macro.nearestSemitone(initHz->Option.getOr(293.66))),
+      ~defaultValue=Macro.hzToNorm(Macro.nearestSemitone(initHz)),
       ~onChange=n =>
         if hasFocus() {
           setPitch(Macro.normToHz(n))
@@ -906,7 +884,7 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
     ring: Knob.make(
       ~label="Ring",
       ~title="How long it rings after each sound. Pitch and Color keep it where you put it. The last part of the turn sustains itself.",
-      ~defaultValue=Macro.ringToNorm(initRing->Option.getOr(Macro.Fades(0.5))),
+      ~defaultValue=Macro.ringToNorm(initRing),
       ~onChange=setRing,
       ~onGestureStart=tuningStart,
       ~onGestureEnd=tuningEnd,
@@ -956,13 +934,7 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
       tuningStart()
       peakDrag :=
         Some({
-          startHz: Macro.pitch(
-            ~f=currentF(),
-            ~k=currentK(),
-            ~speed=currentSpeed(),
-            ~resonance=currentResonance(),
-            ~du=currentDu(),
-          )->Option.getOr(targetHz.contents),
+          startHz: currentFocus()->Option.mapOr(targetHz.contents, x => x.hz),
           startRing: knobs.ring.value,
           across: false,
           upDown: false,
@@ -975,11 +947,10 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
         drag.upDown = drag.upDown || Math.abs(rise) > 3.0
         if drag.across {
           let hz = drag.startHz *. Math.pow(2.0, ~exp=octaves)
-          targetHz :=
-            Math.min(Macro.maxHz, Math.max(Macro.minHz, fine ? hz : Macro.nearestSemitone(hz)))
+          targetHz := Macro.clampHz(fine ? hz : Macro.nearestSemitone(hz))
         }
         if drag.upDown {
-          targetRing := Macro.normToRing(drag.startRing +. rise /. (fine ? 1000.0 : 200.0))
+          targetRing := Macro.normToRing(drag.startRing +. rise /. Knob.turnTravel(~fine))
         }
         if drag.across || drag.upDown {
           realise()
@@ -992,9 +963,9 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
     }
   onPlotWheel :=
     (up, fine) => {
-      let by = fine ? 0.004 : 0.02
+      let by = Knob.wheelStep(~fine)
       tuningStart()
-      setRing(Knob.clamp01(knobs.ring.value +. (up ? by : -.by)))
+      setRing(knobs.ring.value +. (up ? by : -.by))
       tuningEnd()
     }
   // a double right-click on a knob that is one parameter opens the host's menu for it
@@ -1145,10 +1116,13 @@ let make = (connection: CmajorBindings.patchConnection, host: element) => {
     let s = Param.spec(param)
     let fresh = Math.abs(value -. valueOf(param)) > (s.max -. s.min) *. 1e-6
     applyValue(param, value)
-    if fresh && affectsTargets(param) {
-      adoptTargets()
+    // (what this view sent, it has already shown)
+    if fresh {
+      if affectsTargets(param) {
+        adoptTargets()
+      }
+      refreshDerived()
     }
-    refreshDerived()
   })
   Bridge.onLatticeFrame(bridge, frame => {
     TuringDish.setFrame(dish, frame)

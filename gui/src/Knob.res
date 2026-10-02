@@ -96,6 +96,12 @@ let shake = el => {
 
 let clamp01 = x => Math.min(1.0, Math.max(0.0, x))
 
+/// A full turn is 200 px of travel, 1000 px with Shift.
+let turnTravel = (~fine) => fine ? 1000.0 : 200.0
+
+/// How far a wheel click turns a knob without a snap.
+let wheelStep = (~fine) => fine ? 0.004 : 0.02
+
 let make = (
   ~label: string,
   ~title: string,
@@ -174,10 +180,8 @@ let make = (
   dial->addEventListener("pointermove", ev =>
     switch knob.dragging {
     | Some((startY, startValue)) =>
-      // a full turn is 200 px of travel, 1000 px with Shift
       let fine = shiftKey(ev)
-      let range = fine ? 1000.0 : 200.0
-      onChange(snapped(startValue +. (startY -. clientY(ev)) /. range, ~fine))
+      onChange(snapped(startValue +. (startY -. clientY(ev)) /. turnTravel(~fine), ~fine))
     | None => ()
     }
   )
@@ -198,7 +202,7 @@ let make = (
       switch snap {
       | Some({step}) if !shiftKey(ev) => nudge(step(knob.value, up ? 1 : -1))
       | _ =>
-        let by = shiftKey(ev) ? 0.004 : 0.02
+        let by = wheelStep(~fine=shiftKey(ev))
         nudge(knob.value +. (up ? by : -.by))
       }
     }

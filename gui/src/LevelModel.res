@@ -36,6 +36,17 @@ let steps = (~latticeTime, ~du) => {
   (n, Math.min(longestStep(du), latticeTime /. Int.toFloat(n)))
 }
 
+/// Resonance's anti-damping at Resonance 1: the edge of oscillation for the integrator as it runs
+/// (see updateAntiDamping in the processor), for the focus at f, k whose V* is v.
+let edgeGain = (~f, ~k, ~v, ~dt) => {
+  let v2 = v *. v
+  let trace = k -. v2
+  let det = (f +. k) *. (v2 -. f)
+  Math.max(0.0, -.(trace +. det *. dt) /. (1.0 -. (v2 +. f) *. dt))
+}
+
+let dbToGain = db => Math.pow(10.0, ~exp=db /. 20.0)
+
 // ---------------------------------------------------------------------------
 // The model
 
@@ -59,23 +70,19 @@ let bspline = t => {
   ]
 }
 
-/// ~clampPoles takes a growing mode as just stable, as the processor does for its prediction;
-/// without it, a mode past the edge is left as it is (and the response isn't meaningful).
-let make = (~f, ~k, ~du, ~ratio, ~speed, ~resonance, ~tap, ~drive, ~clampPoles=true) => {
+/// A growing mode is taken as just stable, as the processor does for its prediction.
+let make = (~f, ~k, ~du, ~ratio, ~speed, ~resonance, ~tap, ~drive) => {
   let (n, dt) = steps(~latticeTime=speed, ~du)
   let (u, v, g) = switch T.homogeneousState(~f, ~k) {
-  | Some({u, v}) =>
-    let v2 = v *. v
-    let trace = k -. v2
-    let det = (f +. k) *. (v2 -. f)
-    let edge = -.(trace +. det *. dt) /. (1.0 -. (v2 +. f) *. dt)
-    (u, v, resonance *. Math.max(0.0, edge))
+  | Some({u, v}) => (u, v, resonance *. edgeGain(~f, ~k, ~v, ~dt))
   | None => (1.0, 0.0, 0.0)
   }
-  let tapAt = 32.0 +. tap *. maxPickupDistance
+  // the injectors at ¼ and ¾ of the ring put in the same (each splatted on its node)
+  let injector = numNodes / 4
+  let tapAt = Int.toFloat(injector) +. tap *. maxPickupDistance
   let base = Math.floor(tapAt)
   let w = bspline(tapAt -. base)
-  let injection = [1.0 /. 6.0, 4.0 /. 6.0, 1.0 /. 6.0, 0.0]
+  let injection = bspline(0.0)
   let sections = Array.fromInitializer(~length=numNodes / 4 + 1, m => {
     let q = 2 * m
     let theta = 2.0 *. Math.Constants.pi *. Int.toFloat(q) /. Int.toFloat(numNodes)
@@ -98,20 +105,16 @@ let make = (~f, ~k, ~du, ~ratio, ~speed, ~resonance, ~tap, ~drive, ~clampPoles=t
     let (p00, p01, p10, p11) = p.contents
     let trace = p00 +. p11
     let det = p00 *. p11 -. p01 *. p10
-    let (trace, det) = if !clampPoles {
-      (trace, det)
+    let disc = trace *. trace *. 0.25 -. det
+    let (trace, det) = if disc < 0.0 {
+      det > 0.998 ? (trace *. Math.sqrt(0.998 /. det), 0.998) : (trace, det)
     } else {
-      let disc = trace *. trace *. 0.25 -. det
-      if disc < 0.0 {
-        det > 0.998 ? (trace *. Math.sqrt(0.998 /. det), 0.998) : (trace, det)
-      } else {
-        let clampRoot = r => Math.min(0.999, Math.max(-0.999, r))
-        let r1 = clampRoot(trace *. 0.5 +. Math.sqrt(disc))
-        let r2 = clampRoot(trace *. 0.5 -. Math.sqrt(disc))
-        (r1 +. r2, r1 *. r2)
-      }
+      let clampRoot = r => Math.min(0.999, Math.max(-0.999, r))
+      let r1 = clampRoot(trace *. 0.5 +. Math.sqrt(disc))
+      let r2 = clampRoot(trace *. 0.5 -. Math.sqrt(disc))
+      (r1 +. r2, r1 *. r2)
     }
-    // the injectors at nodes 32 and 96 put in the same; the left pickup reads at tapAt
+    // the left pickup reads at tapAt
     let tapRe = ref(0.0)
     let tapIm = ref(0.0)
     let injRe = ref(0.0)
@@ -122,7 +125,7 @@ let make = (~f, ~k, ~du, ~ratio, ~speed, ~resonance, ~tap, ~drive, ~clampPoles=t
       tapRe := tapRe.contents +. wj *. Math.cos(at)
       tapIm := tapIm.contents +. wj *. Math.sin(at)
       let inj = 2.0 *. injection->Array.getUnsafe(j)
-      let atInj = theta *. Int.toFloat(31 + j)
+      let atInj = theta *. Int.toFloat(injector - 1 + j)
       injRe := injRe.contents +. inj *. Math.cos(atInj)
       injIm := injIm.contents -. inj *. Math.sin(atInj)
     }
@@ -136,7 +139,7 @@ let make = (~f, ~k, ~du, ~ratio, ~speed, ~resonance, ~tap, ~drive, ~clampPoles=t
       det,
     }
   })
-  {sections, inputGain: injectionGain *. Math.pow(10.0, ~exp=drive /. 20.0) *. wetGain}
+  {sections, inputGain: injectionGain *. dbToGain(drive) *. wetGain}
 }
 
 // ---------------------------------------------------------------------------
@@ -162,56 +165,63 @@ let lowPass = {
   (b0, 2.0 *. b0, b0, 2.0 *. (kk *. kk -. 1.0) *. norm, (1.0 -. kk /. q +. kk *. kk) *. norm)
 }
 
-/// The wet path's complex gain at a frequency, from a mono input, before the level match.
-let response = (model, hz) => {
+/// A frequency, as what the response needs of it: z⁻¹ and z⁻², and the fixed output filters there.
+type point = {ziRe: float, ziIm: float, zi2Re: float, zi2Im: float, chain: (float, float)}
+
+let pointAt = hz => {
   let w = 2.0 *. Math.Constants.pi *. hz /. referenceRate
   let zi = (Math.cos(w), -.Math.sin(w))
   let zi2 = cmul(zi, zi)
-  let y = model.sections->Array.reduce((0.0, 0.0), (y, s) =>
-    cadd(
-      y,
-      cscale(
-        cdiv(
-          cadd((s.p11, 0.0), cscale(zi, -.s.det)),
-          cadd(cadd((1.0, 0.0), cscale(zi, -.s.trace)), cscale(zi2, s.det)),
-        ),
-        s.weight,
-      ),
-    )
-  )
   let dc = cdiv(cadd((1.0, 0.0), cscale(zi, -1.0)), cadd((1.0, 0.0), cscale(zi, -.dcCoeff)))
   let (b0, b1, b2, a1, a2) = lowPass
   let lp = cdiv(
     cadd(cadd((b0, 0.0), cscale(zi, b1)), cscale(zi2, b2)),
     cadd(cadd((1.0, 0.0), cscale(zi, a1)), cscale(zi2, a2)),
   )
-  cscale(cmul(cmul(y, dc), lp), model.inputGain)
+  let (ziRe, ziIm) = zi
+  let (zi2Re, zi2Im) = zi2
+  {ziRe, ziIm, zi2Re, zi2Im, chain: cmul(dc, lp)}
+}
+
+/// The wet path's complex gain at a point, from a mono input, before the level match.
+let response = (model, p) => {
+  // Σ weight · (p11 − z⁻¹·det) / (1 − z⁻¹·trace + z⁻²·det), on plain floats: it runs for every
+  // section at every point
+  let re = ref(0.0)
+  let im = ref(0.0)
+  model.sections->Array.forEach(s => {
+    let nr = s.p11 -. p.ziRe *. s.det
+    let ni = -.p.ziIm *. s.det
+    let dr = 1.0 -. p.ziRe *. s.trace +. p.zi2Re *. s.det
+    let di = -.p.ziIm *. s.trace +. p.zi2Im *. s.det
+    let scale = s.weight /. (dr *. dr +. di *. di)
+    re := re.contents +. (nr *. dr +. ni *. di) *. scale
+    im := im.contents +. (ni *. dr -. nr *. di) *. scale
+  })
+  cscale(cmul((re.contents, im.contents), p.chain), model.inputGain)
 }
 
 let modelPoints = 96
 
+// 20 Hz to 20 kHz, log-spaced
+let pinkPoints = Array.fromInitializer(~length=modelPoints, j =>
+  pointAt(20.0 *. Math.pow(1000.0, ~exp=(Int.toFloat(j) +. 0.5) /. Int.toFloat(modelPoints)))
+)
+
 /// RMS gain for pink noise, 20 Hz to 20 kHz.
-let pinkGain = model => {
-  let total = ref(0.0)
-  for j in 0 to modelPoints - 1 {
-    let hz = 20.0 *. Math.pow(1000.0, ~exp=(Int.toFloat(j) +. 0.5) /. Int.toFloat(modelPoints))
-    total := total.contents +. abs2(response(model, hz))
-  }
-  Math.sqrt(total.contents /. Int.toFloat(modelPoints))
-}
+let pinkGain = model =>
+  Math.sqrt(
+    pinkPoints->Array.reduce(0.0, (total, p) => total +. abs2(response(model, p))) /.
+      Int.toFloat(modelPoints),
+  )
+
+/// The gain the processor puts on the wet path for a model of its settings, before its learned
+/// trim (the model has to take Resonance as no more than modelResonanceCap, as the processor does).
+let matchFor = model =>
+  Math.min(maxLevelMatch, Math.max(minLevelMatch, 1.0 /. Math.max(pinkGain(model), 1.0e-9)))
 
 /// The gain the processor puts on the wet path for these settings, before its learned trim.
-let predictedMatch = (~f, ~k, ~du, ~ratio, ~speed, ~resonance, ~tap, ~drive) => {
-  let model = make(
-    ~f,
-    ~k,
-    ~du,
-    ~ratio,
-    ~speed,
-    ~resonance=Math.min(resonance, modelResonanceCap),
-    ~tap,
-    ~drive,
+let predictedMatch = (~f, ~k, ~du, ~ratio, ~speed, ~resonance, ~tap, ~drive) =>
+  matchFor(
+    make(~f, ~k, ~du, ~ratio, ~speed, ~resonance=Math.min(resonance, modelResonanceCap), ~tap, ~drive),
   )
-  Math.min(1000.0, Math.max(minLevelMatch, 1.0 /. Math.max(pinkGain(model), 1.0e-9)))
-  ->Math.min(maxLevelMatch)
-}

@@ -11,7 +11,7 @@ open Web
 module Bindings = CmajorBindings
 
 let numNodes = 128
-let maxPickupDistance = 12.0 // nodes — matches the processor constant
+let maxPickupDistance = LevelModel.maxPickupDistance
 
 // ~7 s of history at 30 snapshots/s, whatever size the view is drawn at
 let historyRows = 210

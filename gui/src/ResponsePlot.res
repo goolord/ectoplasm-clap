@@ -36,16 +36,29 @@ type settings = {
   outputDb: float,
 }
 
+// the plot's frequencies, one per column of the curve
+let columns = 320
+let columnHz = Array.fromInitializer(~length=columns + 1, i =>
+  minHz *. Math.pow(maxHz /. minHz, ~exp=Int.toFloat(i) /. Int.toFloat(columns))
+)
+let columnPoints = columnHz->Array.map(LevelModel.pointAt)
+
+/// The wet path as the processor makes it up, before Mix and Output: the complex gain at each
+/// column, and at the peak. It's worked out again only when the settings it depends on change.
+type curve = {
+  wet: array<(float, float)>,
+  peakWet: option<(float, float)>,
+}
+
 type t = {
   element: element,
   ctx: ctx2d,
   width: float,
   height: float,
   mutable settings: option<settings>,
-  // where the peak is, if there's a focus to drag
-  mutable peakHz: option<float>,
-  // where the curve is at the peak, in design pixels (the handle sits there)
-  mutable peakY: float,
+  // the focus, if there's one (its peak is the handle), and the curve once it's drawn
+  mutable focus: option<Macro.focus>,
+  mutable curve: option<curve>,
   mutable hover: bool,
   // the pointer where a drag started, in design pixels
   mutable dragging: option<(float, float)>,
@@ -53,12 +66,34 @@ type t = {
   mutable invalidate: unit => unit,
 }
 
+let curveOf = ({f, k, du, ratio, speed, resonance, tap, drive}: settings, focus) => {
+  let model = LevelModel.make(~f, ~k, ~du, ~ratio, ~speed, ~resonance, ~tap, ~drive)
+  // (the match takes Resonance capped, so below the cap it's the same model)
+  let gain =
+    resonance <= LevelModel.modelResonanceCap
+      ? LevelModel.matchFor(model)
+      : LevelModel.predictedMatch(~f, ~k, ~du, ~ratio, ~speed, ~resonance, ~tap, ~drive)
+  let wetAt = p => LevelModel.cscale(LevelModel.response(model, p), gain)
+  {
+    wet: columnPoints->Array.map(wetAt),
+    peakWet: focus->Option.map(({Macro.hz: hz}) => wetAt(LevelModel.pointAt(hz))),
+  }
+}
+
 let set = (plot, settings: settings) =>
   if plot.settings != Some(settings) {
+    // Mix and Output only change how the curve is drawn
+    let sameWet = switch plot.settings {
+    | Some(old) => {...old, mix: settings.mix, outputDb: settings.outputDb} == settings
+    | None => false
+    }
     plot.settings = Some(settings)
-    let {f, k, speed, resonance, du} = settings
-    plot.peakHz = Macro.pitch(~f, ~k, ~speed, ~resonance, ~du)
-    plot.element->toggleClass("draggable", plot.peakHz->Option.isSome)
+    if !sameWet {
+      let {f, k, speed, resonance, du} = settings
+      plot.focus = Macro.focus(~f, ~k, ~speed, ~resonance, ~du)
+      plot.curve = None
+      plot.element->toggleClass("draggable", plot.focus->Option.isSome)
+    }
     plot.dirty = true
     plot.invalidate()
   }
@@ -133,22 +168,23 @@ let render = plot =>
       Ctx.fillText(ctx, text, anchorRight ? x -. 8.0 : x +. 8.0, 1.0)
     }
 
-    plot.settings->Option.forEach(({f, k, du, ratio, speed, resonance, tap, drive, mix, outputDb}) => {
-      let model = LevelModel.make(~f, ~k, ~du, ~ratio, ~speed, ~resonance, ~tap, ~drive)
-      let gain = LevelModel.predictedMatch(~f, ~k, ~du, ~ratio, ~speed, ~resonance, ~tap, ~drive)
-      let output = Math.pow(10.0, ~exp=outputDb /. 20.0)
+    plot.settings->Option.forEach(settings => {
+      let {mix, outputDb} = settings
+      let {wet, peakWet} = switch plot.curve {
+      | Some(curve) => curve
+      | None =>
+        let curve = curveOf(settings, plot.focus)
+        plot.curve = Some(curve)
+        curve
+      }
+      let output = LevelModel.dbToGain(outputDb)
       // the wet path, made up, mixed with the dry signal (in phase with it), through Output
-      let dbAt = hz => {
-        let (re, im) = LevelModel.response(model, hz)
-        let re = mix *. gain *. re +. (1.0 -. mix)
-        let im = mix *. gain *. im
+      let dbOf = ((re, im)) => {
+        let re = mix *. re +. (1.0 -. mix)
+        let im = mix *. im
         20.0 *. Math.log10(Math.max(1.0e-9, Math.sqrt(re *. re +. im *. im) *. output))
       }
-      let steps = 320
-      let points = Array.fromInitializer(~length=steps + 1, i => {
-        let x = Int.toFloat(i) /. Int.toFloat(steps) *. w
-        (x, yOf(dbAt(minHz *. Math.pow(maxHz /. minHz, ~exp=x /. w))))
-      })
+      let points = wet->Array.mapWithIndex((y, i) => (xOf(columnHz->Array.getUnsafe(i)), yOf(dbOf(y))))
       Ctx.beginPath(ctx)
       Ctx.moveTo(ctx, 0.0, bottom)
       points->Array.forEach(((x, y)) => Ctx.lineTo(ctx, x, y))
@@ -161,10 +197,9 @@ let render = plot =>
       Ctx.strokeStyle(ctx, Palette.accent)
       Ctx.lineWidth(ctx, 1.5)
       Ctx.stroke(ctx)
-      plot.peakHz->Option.forEach(hz => plot.peakY = yOf(dbAt(hz)))
 
-      switch Macro.focus(~f, ~k, ~speed, ~resonance, ~du) {
-      | Some({hz: hz0, decayPerSecond}) =>
+      switch (plot.focus, peakWet) {
+      | (Some({hz: hz0, decayPerSecond}), Some(peakWet)) =>
         let x0 = xOf(hz0)
         let note = Macro.tuning(hz0) ++ ", " ++ Macro.formatHz(hz0)
         if decayPerSecond <= 0.0 {
@@ -176,7 +211,26 @@ let render = plot =>
         } else {
           label(note, x0)
         }
-      | None =>
+
+        // the peak's handle, and how to use it (out of the way of the peak, and gone while dragging)
+        let y = Math.max(top, yOf(dbOf(peakWet)))
+        let active = plot.hover || plot.dragging->Option.isSome
+        Ctx.beginPath(ctx)
+        Ctx.arc(ctx, x0, y, active ? 5.0 : 4.0, 0.0, 2.0 *. Math.Constants.pi)
+        Ctx.fillStyle(ctx, active ? Palette.active : Palette.accent)
+        Ctx.fill(ctx)
+        Ctx.strokeStyle(ctx, Palette.glass)
+        Ctx.lineWidth(ctx, 2.0)
+        Ctx.stroke(ctx)
+        if plot.dragging->Option.isNone {
+          Ctx.font(ctx, font)
+          Ctx.textBaseline(ctx, "bottom")
+          let onLeft = x0 > w /. 2.0
+          Ctx.textAlign(ctx, onLeft ? "left" : "right")
+          Ctx.fillStyle(ctx, Palette.css(Palette.inkMutedRgb, plot.hover ? 1.0 : 0.75))
+          Ctx.fillText(ctx, hint, onLeft ? 6.0 : w -. 6.0, bottom -. 4.0)
+        }
+      | _ =>
         Ctx.font(ctx, font)
         Ctx.textAlign(ctx, "center")
         Ctx.textBaseline(ctx, "top")
@@ -187,28 +241,6 @@ let render = plot =>
           w /. 2.0,
           1.0,
         )
-      }
-    })
-
-    // the peak's handle, and how to use it (out of the way of the peak, and gone while dragging)
-    plot.peakHz->Option.forEach(hz => {
-      let x = xOf(hz)
-      let y = Math.max(top, plot.peakY)
-      let active = plot.hover || plot.dragging->Option.isSome
-      Ctx.beginPath(ctx)
-      Ctx.arc(ctx, x, y, active ? 5.0 : 4.0, 0.0, 2.0 *. Math.Constants.pi)
-      Ctx.fillStyle(ctx, active ? Palette.active : Palette.accent)
-      Ctx.fill(ctx)
-      Ctx.strokeStyle(ctx, Palette.glass)
-      Ctx.lineWidth(ctx, 2.0)
-      Ctx.stroke(ctx)
-      if plot.dragging->Option.isNone {
-        Ctx.font(ctx, font)
-        Ctx.textBaseline(ctx, "bottom")
-        let onLeft = x > w /. 2.0
-        Ctx.textAlign(ctx, onLeft ? "left" : "right")
-        Ctx.fillStyle(ctx, Palette.css(Palette.inkMutedRgb, plot.hover ? 1.0 : 0.75))
-        Ctx.fillText(ctx, hint, onLeft ? 6.0 : w -. 6.0, bottom -. 4.0)
       }
     })
   }
@@ -234,8 +266,8 @@ let make = (
     width: Int.toFloat(width),
     height: Int.toFloat(height),
     settings: None,
-    peakHz: None,
-    peakY: 0.0,
+    focus: None,
+    curve: None,
     hover: false,
     dragging: None,
     dirty: true,
@@ -250,7 +282,7 @@ let make = (
 
   // The drag is relative, so it can start anywhere on the plot without the peak jumping.
   element->addEventListener("pointerdown", ev =>
-    if ev->button == 0 && plot.peakHz->Option.isSome {
+    if ev->button == 0 && plot.focus->Option.isSome {
       preventDefault(ev)
       setPointerCapture(element, pointerId(ev))
       plot.dragging = Some(point(ev))
@@ -286,7 +318,7 @@ let make = (
     redraw()
   })
   element->addEventListener("wheel", ev =>
-    if !ctrlKey(ev) && plot.peakHz->Option.isSome {
+    if !ctrlKey(ev) && plot.focus->Option.isSome {
       preventDefault(ev)
       onWheel(~up=deltaY(ev) < 0.0, ~fine=shiftKey(ev))
     }

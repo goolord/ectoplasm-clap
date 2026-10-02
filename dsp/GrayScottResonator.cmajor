@@ -192,6 +192,10 @@ namespace GrayScott
         float smoothCoeff;
         float rateScale;             // referenceRate / sample rate
 
+        // Sub-steps per sample and their length, for the Speed and Diffusion they were worked out at
+        int latticeSteps;
+        float latticeDt, stepsSpeed = -1.0f, stepsDu = -1.0f;
+
         // Resonance: anti-damping g·(V − V*), updated every 64 samples (V* is vRef)
         float antiDamping;
         int framesUntilFocusUpdate;
@@ -275,10 +279,17 @@ namespace GrayScott
             {
                 smoothParameters();
 
-                // Lattice time per sample, in Euler sub-steps (see subSteps)
-                let latticeTime = speedS * rateScale;
-                let steps = subSteps (latticeTime, duS);
-                let dt = stepLength (latticeTime, steps, duS);
+                // Lattice time per sample, in Euler sub-steps (see subSteps), worked out
+                // again only while Speed or Diffusion moves
+                if (speedS != stepsSpeed || duS != stepsDu)
+                {
+                    stepsSpeed = speedS;
+                    stepsDu = duS;
+                    let latticeTime = speedS * rateScale;
+                    latticeSteps = subSteps (latticeTime, duS);
+                    latticeDt = stepLength (latticeTime, latticeSteps, duS);
+                }
+
                 let du = duS;
                 let dv = duS * ratioS;
 
@@ -294,7 +305,7 @@ namespace GrayScott
                 if (--framesUntilFocusUpdate <= 0)
                 {
                     framesUntilFocusUpdate = 64;
-                    updateAntiDamping (dt);
+                    updateAntiDamping (latticeDt);
                     latticeMass = sum (vOff) + float (numNodes) * vRef;
                     flushTinyOffsets();
                 }
@@ -308,8 +319,8 @@ namespace GrayScott
                 splat (injL, injectionGain * excL);
                 splat (injR, injectionGain * excR);
 
-                for (int s = 0; s < steps; ++s)
-                    integrate (dt, feedS, killS, du, dv);
+                for (int s = 0; s < latticeSteps; ++s)
+                    integrate (latticeDt, feedS, killS, du, dv);
 
                 trackInput (x);
                 checkForCollapse();
@@ -569,7 +580,7 @@ namespace GrayScott
         /// stretch tails or pump.
         float matchLevel (float<2> x, float<2> raw)
         {
-            predictedS += (predicted - predictedS) * smoothCoeff;
+            predictedS = glide (predictedS, predicted);
 
             if (inputEnvelope >= inputPresentThreshold)
             {
@@ -636,17 +647,19 @@ namespace GrayScott
             predictedS = predicted;
         }
 
-        /// Takes the settings the model works on.
+        /// Takes the settings the model works on: the targets, so it runs once for a
+        /// change rather than all through the glide (predictedS does the gliding).
+        /// Resonance is taken capped, so a move above the cap doesn't rerun it.
         void startLevelModel()
         {
-            modelF = feedS;
-            modelK = killS;
-            modelDu = duS;
-            modelRatio = ratioS;
-            modelSpeed = speedS;
-            modelFb = fbS;
-            modelDist = distS;
-            modelDrive = driveS;
+            modelF = feedT;
+            modelK = killT;
+            modelDu = duT;
+            modelRatio = ratioT;
+            modelSpeed = speedT;
+            modelFb = min (fbT, modelResonanceCap);
+            modelDist = distT;
+            modelDrive = driveT;
 
             let latticeTime = modelSpeed * rateScale;
             modelSteps = subSteps (latticeTime, modelDu);
@@ -655,16 +668,7 @@ namespace GrayScott
             let state = homogeneousState (modelF, modelK);
             modelU = state[0];
             modelV = state[1];
-            modelG = 0.0f;
-
-            if (modelV > 0.0f)
-            {
-                let v2 = modelV * modelV;
-                let trace = modelK - v2;
-                let det = (modelF + modelK) * (v2 - modelF);
-                let edge = -(trace + det * modelDt) / (1.0f - (v2 + modelF) * modelDt);
-                modelG = min (modelFb, modelResonanceCap) * max (0.0f, edge);
-            }
+            modelG = modelFb * edgeGain (modelF, modelK, modelV, modelDt);
 
             modelStage = 0;
             modelPower = 0.0f;
@@ -674,9 +678,10 @@ namespace GrayScott
 
         bool settingsMoved()
         {
-            return ! (near (modelF, feedS) && near (modelK, killS) && near (modelDu, duS)
-                       && near (modelRatio, ratioS) && near (modelSpeed, speedS) && near (modelDrive, driveS)
-                       && abs (modelFb - fbS) <= 1.0e-3f && abs (modelDist - distS) <= 1.0e-3f);
+            return ! (near (modelF, feedT) && near (modelK, killT) && near (modelDu, duT)
+                       && near (modelRatio, ratioT) && near (modelSpeed, speedT)
+                       && abs (modelFb - min (fbT, modelResonanceCap)) <= 1.0e-3f
+                       && abs (modelDist - distT) <= 1.0e-3f);
         }
 
         void stepLevelModel()
@@ -689,8 +694,14 @@ namespace GrayScott
                 finishLevelModel();
             else
             {
+                // Drive only scales the result, so it needn't run the model again
                 if (settingsMoved())
                     startLevelModel();
+                else if (modelDrive != driveT)
+                {
+                    modelDrive = driveT;
+                    finishLevelModel();
+                }
 
                 return;
             }
@@ -760,9 +771,11 @@ namespace GrayScott
             modeTrace.at (m) = trace;
             modeDet.at (m) = det;
 
-            // the injectors at nodes 32 and 96 put in the same (B-spline weights
-            // 1/6, 4/6, 1/6 around each); the left pickup reads at 32 + distance
-            let tap = 32.0f + modelDist * maxPickupDistance;
+            // the injectors at ¼ and ¾ of the ring put in the same (each splatted
+            // on its node); the left pickup reads at ¼ + distance
+            let injector = numNodes / 4;
+            let injection = bsplineWeights (0.0f);
+            let tap = float (injector) + modelDist * maxPickupDistance;
             let base = int (floor (tap));
             let w = bsplineWeights (tap - float (base));
             var tapRe = 0.0f;
@@ -775,10 +788,9 @@ namespace GrayScott
                 let t = (q * (base - 1 + j)) & (numNodes - 1);
                 tapRe += w.at (j) * ringCos.at (t);
                 tapIm += w.at (j) * ringSin.at (t);
-                let i = (q * (31 + j)) & (numNodes - 1);
-                let injection = j == 1 ? 4.0f / 6.0f : (j == 3 ? 0.0f : 1.0f / 6.0f);
-                injRe += 2.0f * injection * ringCos.at (i);
-                injIm -= 2.0f * injection * ringSin.at (i);
+                let i = (q * (injector - 1 + j)) & (numNodes - 1);
+                injRe += 2.0f * injection.at (j) * ringCos.at (i);
+                injIm -= 2.0f * injection.at (j) * ringSin.at (i);
             }
 
             // mode q and its mirror −q together, as a real weight
@@ -813,13 +825,15 @@ namespace GrayScott
         /// the lattice runs slow rather than breaking the bound.
         int subSteps (float latticeTime, float du)
         {
-            return clamp (int (ceil (latticeTime / min (maxStep, 0.5f / du))), 1, maxSubSteps);
+            return clamp (int (ceil (latticeTime / longestStep (du))), 1, maxSubSteps);
         }
 
         float stepLength (float latticeTime, int steps, float du)
         {
-            return min (min (maxStep, 0.5f / du), latticeTime / float (steps));
+            return min (longestStep (du), latticeTime / float (steps));
         }
+
+        float longestStep (float du)    { return min (maxStep, 0.5f / du); }
 
         /// Resonance as anti-damping, normalised so Resonance 1 is exactly the
         /// edge of oscillation for the integrator as it runs (dt per sub-step).
@@ -833,16 +847,19 @@ namespace GrayScott
         {
             let state = homogeneousState (feedS, killS);
             moveReference (state[0], state[1]);
-            antiDamping = 0.0f;
+            antiDamping = fbS * edgeGain (feedS, killS, vRef, dt);
+        }
 
-            if (vRef > 0.0f)
-            {
-                let v2 = vRef * vRef;
-                let trace = killS - v2;
-                let det = (feedS + killS) * (v2 - feedS);
-                let edge = -(trace + det * dt) / (1.0f - (v2 + feedS) * dt);
-                antiDamping = fbS * max (0.0f, edge);
-            }
+        /// g_edge for the focus at F, K (V is its V*), or 0 where there's none.
+        float edgeGain (float F, float K, float V, float dt)
+        {
+            if (V <= 0.0f)
+                return 0.0f;
+
+            let v2 = V * V;
+            let trace = K - v2;
+            let det = (F + K) * (v2 - F);
+            return max (0.0f, -(trace + det * dt) / (1.0f - (v2 + F) * dt));
         }
 
         /// Takes a new reference state (F or K has moved), keeping the concentrations
