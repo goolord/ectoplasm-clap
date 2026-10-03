@@ -67,9 +67,12 @@ default: package
 deps:
     npm install
 
+# (gui/dist/ is emptied first: Cmajor's generator embeds every file in the view's folder in the
+# plugin, not only the ones the manifest names, so a file left over there makes it bigger)
 # Compile the ReScript interface and bundle it into gui/dist/
 ui:
     {{ if path_exists(root / "node_modules" / "rescript") == "true" { "cmake -E echo \"node modules present\"" } else { "npm install" } }}
+    cmake -E rm -rf "{{ root / "gui" / "dist" }}"
     npm run build
 
 # Fetch the CLAP headers (once per CLAP_VERSION)
