@@ -5,12 +5,12 @@
     "name":             "Ectoplasm",
     "description":      "A Gray-Scott reaction-diffusion resonator",
     "category":         "effect",
-    "manufacturer":     "Ectoplasm",
+    "manufacturer":     "goolord",
     "isInstrument":     false,
 
     "plugin":
     {
-        "manufacturerCode":  "Ecto",
+        "manufacturerCode":  "Gool",
         "pluginCode":        "Ecto"
     },
 
